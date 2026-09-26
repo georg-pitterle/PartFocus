@@ -1,0 +1,128 @@
+{
+    // Run/Debug-Konfigurationen für PartFocus. Alle laufen mit dem Interpreter
+    // aus .venv, unabhängig davon, welcher in VS Code gewählt ist.
+    // -Xfrozen_modules=off: sonst warnt debugpy, Breakpoints in eingefrorenen
+    // Standardmodulen könnten übersehen werden.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "PartFocus",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "partfocus",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "pythonArgs": ["-Xfrozen_modules=off"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "PartFocus (auch in Bibliotheken anhalten)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "partfocus",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "pythonArgs": ["-Xfrozen_modules=off"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            // Schrittweise auch durch PySide6, Velopack und die Standardbibliothek.
+            "justMyCode": false
+        },
+        {
+            "name": "PartFocus: Selbsttest",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "partfocus",
+            "args": ["--selftest", "${workspaceFolder}/selftest.txt"],
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "pythonArgs": ["-Xfrozen_modules=off"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "CLI: alle .mscz im Projektordner",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "partfocus.core",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "pythonArgs": ["-Xfrozen_modules=off"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "CLI: Dry-Run",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "partfocus.core",
+            "args": ["--dry-run"],
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "pythonArgs": ["-Xfrozen_modules=off"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "CLI: gewählte Partitur",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "partfocus.core",
+            "args": ["${input:score}", "--sound=${input:sound}"],
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "pythonArgs": ["-Xfrozen_modules=off"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Tests: aktuelle Datei",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["${file}", "-q"],
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "pythonArgs": ["-Xfrozen_modules=off"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Tests: alle",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["-q"],
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "pythonArgs": ["-Xfrozen_modules=off"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Icon neu erzeugen",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/make_icon.py",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ],
+    "inputs": [
+        {
+            "id": "score",
+            "type": "promptString",
+            "description": "Pfad zu einer .mscz oder einem Ordner mit .mscz",
+            "default": "${workspaceFolder}"
+        },
+        {
+            "id": "sound",
+            "type": "pickString",
+            "description": "Klang",
+            "options": ["original", "choir", "piano"],
+            "default": "original"
+        }
+    ]
+}

@@ -1,0 +1,29 @@
+[project]
+name = "partfocus"
+version = "0.0.0"
+description = "Übe-Tracks pro Stimme aus MuseScore-Partituren, gerendert mit Muse Sounds"
+requires-python = ">=3.11"
+dependencies = [
+    # Nur QtCore, QtGui und QtWidgets; die Addons würden das Bundle aufblähen.
+    "PySide6-Essentials",
+    "velopack",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pyinstaller", "Pillow"]
+
+[project.scripts]
+partfocus-cli = "partfocus.core:main"
+
+[project.gui-scripts]
+partfocus = "partfocus.gui:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["partfocus*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

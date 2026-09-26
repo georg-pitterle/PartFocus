@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+# PartFocus.spec ist handgeschrieben und gehört ins Repo.
+.pytest_cache/
+*.egg-info/
+selftest.txt
+# Partituren und gerenderte Tracks sind Arbeitsmaterial, nicht Quellcode.
+*.mscz
+*.mp3
+*.wav
+Releases/
