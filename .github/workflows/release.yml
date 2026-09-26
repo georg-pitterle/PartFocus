@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     branches: [main]
+  # Von Hand startbar, etwa um einen geschlossenen Release-PR neu anlegen zu lassen.
+  workflow_dispatch:
 
 permissions:
   contents: write
