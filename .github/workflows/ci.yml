@@ -4,18 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Der Release-PR von release-please ändert nur diese Dateien. Ohne Filter
+    # startet CI darauf und GitHub hält den Lauf an ("This workflow is awaiting
+    # approval from a maintainer"), weil github-actions[bot] den PR erstellt hat.
+    # Eine if-Bedingung im Job hilft nicht, die Sperre greift vorher; nur ein
+    # Filter am Auslöser verhindert den Lauf. Tests laufen vor jedem Release
+    # ohnehin im Release-Workflow.
+    paths-ignore:
+      - CHANGELOG.md
+      - .release-please-manifest.json
+      - partfocus/_version.py
 
 jobs:
   test:
-    # Den Release-PR überspringen: Er trägt nur Versionssprung und Changelog,
-    # und der Release-Workflow lässt die Tests vor dem Paketieren ohnehin laufen.
-    #
-    # Am Autor des Pull Requests festgemacht, nie am Branch-Namen: Jeder kann
-    # einen Branch 'release-please--...' nennen und bekäme sonst einen PR, in
-    # dem stillschweigend keine Tests laufen.
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.user.login != 'github-actions[bot]'
     # Windows, weil die App nur dort ausgeliefert wird und MuseScore-Pfade
     # und Prozess-Flags Windows-spezifisch sind.
     runs-on: windows-latest

@@ -1,6 +1,8 @@
 [project]
 name = "partfocus"
-version = "0.0.0"
+# Die Version steht nur in partfocus/_version.py. So ändert der Release-PR
+# keine Datei, auf die CI reagiert (siehe paths-ignore in ci.yml).
+dynamic = ["version"]
 description = "Übe-Tracks pro Stimme aus MuseScore-Partituren, gerendert mit Muse Sounds"
 requires-python = ">=3.11"
 dependencies = [
@@ -21,6 +23,9 @@ partfocus = "partfocus.gui:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "partfocus._version.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["partfocus*"]
