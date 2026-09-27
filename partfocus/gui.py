@@ -6,8 +6,9 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMessageBox, QProgressBar, QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QSlider,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import core, theme
@@ -42,6 +43,41 @@ class Worker(QThread):
         self.done.emit(results)
 
 
+class PathsDialog(QDialog):
+    """Wo MuseScore 4 und Muse Sounds liegen, falls nicht am Standardort."""
+
+    def __init__(self, parent: QWidget, mscore: str, sampler: str):
+        super().__init__(parent)
+        self.setWindowTitle("Pfade")
+        self.setMinimumWidth(560)
+        form = QFormLayout(self)
+        self.mscore = self._row(form, "MuseScore 4", mscore, lambda: QFileDialog.getOpenFileName(
+            self, "MuseScore4.exe wählen", self.mscore.text(), "Programm (*.exe)")[0])
+        self.sampler = self._row(form, "Muse Sounds", sampler, lambda: QFileDialog.getExistingDirectory(
+            self, "MuseSampler-Ordner wählen", self.sampler.text()))
+        form.addRow(QLabel("Muse Sounds: der Ordner „MuseSampler“, den Muse Hub anlegt (enthält lib\\).",
+                           objectName="Muted", wordWrap=True))
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+                                   | QDialogButtonBox.RestoreDefaults)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self.restore_defaults)
+        form.addRow(buttons)
+
+    def _row(self, form: QFormLayout, label: str, value: str, browse) -> QLineEdit:
+        edit = QLineEdit(value)
+        pick = QPushButton("…", objectName="Quiet", clicked=lambda: edit.setText(browse() or edit.text()))
+        row = QHBoxLayout()
+        row.addWidget(edit, 1)
+        row.addWidget(pick)
+        form.addRow(label, row)
+        return edit
+
+    def restore_defaults(self):
+        self.mscore.setText(core.MSCORE)
+        self.sampler.setText(str(core.default_sampler()))
+
+
 class Window(QWidget):
     # Vom Update-Thread gesendet; Qt stellt sie in den UI-Thread zu.
     update_ready = Signal(object)  # PendingUpdate, fertig geladen
@@ -66,6 +102,8 @@ class Window(QWidget):
         add_files = QPushButton("Dateien hinzufügen …", objectName="Quiet", clicked=self.add_files)
         add_dir = QPushButton("Ordner hinzufügen …", objectName="Quiet", clicked=self.add_dir)
         self.remove_btn = QPushButton("Entfernen", clicked=self.remove_selected)
+        self.paths_btn = QPushButton("Pfade …", objectName="Quiet", clicked=self.edit_paths)
+        self.paths_btn.setToolTip("Wo MuseScore 4 und Muse Sounds installiert sind")
         self.update_label = QLabel(objectName="Muted")
         self.update_btn = QPushButton("Jetzt neu starten", objectName="Quiet", clicked=self.restart_into_update)
         self.update_label.hide()
@@ -75,7 +113,7 @@ class Window(QWidget):
         tb.addWidget(self.update_label)
         tb.addWidget(self.update_btn)
         tb.addStretch()
-        for b in (add_files, add_dir, self.remove_btn):
+        for b in (add_files, add_dir, self.remove_btn, self.paths_btn):
             tb.addWidget(b)
 
         # Liste bzw. Hinweis, solange sie leer ist
@@ -188,6 +226,36 @@ class Window(QWidget):
             self.update_label.setText("Neustart nicht möglich, das Update wird beim Schließen installiert")
             self.update_btn.hide()
 
+    # --- Voraussetzungen --------------------------------------------------
+
+    def mscore(self) -> str:
+        return self.settings.value("mscore", "") or core.MSCORE
+
+    def sampler(self) -> Path:
+        return Path(self.settings.value("sampler", "") or core.default_sampler())
+
+    def warn_missing_requirements(self):
+        missing = core.missing_requirements(self.mscore(), self.sampler())
+        if not missing:
+            return
+        box = QMessageBox(QMessageBox.Warning, "Voraussetzungen fehlen",
+                          "Für den Export fehlt:\n\n" + "\n".join(f"• {m}" for m in missing),
+                          QMessageBox.Ok, self)
+        paths = box.addButton("Pfade ändern …", QMessageBox.ActionRole)
+        box.exec()
+        if box.clickedButton() is paths:
+            self.edit_paths()
+
+    def edit_paths(self):
+        dialog = PathsDialog(self, self.mscore(), str(self.sampler()))
+        if dialog.exec() != QDialog.Accepted:
+            return
+        # Standardwerte leer speichern, damit sie einem geänderten Standard folgen.
+        mscore, sampler = dialog.mscore.text().strip(), dialog.sampler.text().strip()
+        self.settings.setValue("mscore", "" if mscore == core.MSCORE else mscore)
+        self.settings.setValue("sampler", "" if Path(sampler) == core.default_sampler() else sampler)
+        self.warn_missing_requirements()
+
     # --- Liste ------------------------------------------------------------
 
     def scores(self) -> list[Path]:
@@ -254,7 +322,7 @@ class Window(QWidget):
         self.remove_btn.setEnabled(not busy and bool(self.list.selectedItems()))
         self.start_btn.setEnabled(busy or self.list.count() > 0)
         self.start_btn.setText("Abbrechen" if busy else "Tracks erstellen")
-        for w in (self.others, self.dynamic, self.sound, self.list):
+        for w in (self.others, self.dynamic, self.sound, self.list, self.paths_btn):
             w.setEnabled(not busy)
         # Kein Neustart mitten im Rendern: MuseScore liefe verwaist weiter.
         self.update_btn.setEnabled(not busy)
@@ -276,12 +344,13 @@ class Window(QWidget):
             self.status.setText("Breche ab …")
             self.start_btn.setEnabled(False)
             return
-        if not Path(core.MSCORE).is_file():
-            QMessageBox.critical(self, "MuseScore fehlt", f"MuseScore nicht gefunden:\n{core.MSCORE}")
+        if not Path(self.mscore()).is_file():
+            QMessageBox.critical(self, "MuseScore fehlt",
+                                 f"MuseScore nicht gefunden:\n{self.mscore()}\n\nPfad unter „Pfade …“ einstellen.")
             return
         self.save_settings()
         opts = core.Options(others_db=float(self.others.value()), flat_dynamic=self.dynamic.currentData(),
-                                 sound=self.sound.currentData())
+                                 sound=self.sound.currentData(), mscore=self.mscore())
         scores = [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
                   if self.list.item(i).data(Qt.UserRole + 1)]
         if not scores:
@@ -390,6 +459,7 @@ def main():
     window = Window()
     window.add_paths(sys.argv[1:])
     window.show()
+    QTimer.singleShot(0, window.warn_missing_requirements)
     return app.exec()
 
 

@@ -194,3 +194,47 @@ def test_wav_peak_reads_float_wav(tmp_path):
 def test_wav_peak_negative_peak(tmp_path):
     wav = write_float_wav(tmp_path / "x.wav", [0.1, -0.9])
     assert core.wav_peak(wav) == pytest.approx(0.9)
+
+
+# --- Voraussetzungen ---------------------------------------------------------
+
+def make_sampler(tmp_path: Path, packs=("Muse Choir", "Muse Keys")) -> Path:
+    sampler, instruments = tmp_path / "MuseSampler", tmp_path / "Instruments"
+    (sampler / "lib").mkdir(parents=True)
+    (sampler / "lib" / "MuseSamplerCoreLib.dll").write_bytes(b"")
+    (sampler / ".config").write_text(f"{instruments}\n", encoding="utf-8")
+    for p in packs:
+        (instruments / p).mkdir(parents=True)
+    return sampler
+
+
+@pytest.fixture
+def mscore(tmp_path):
+    exe = tmp_path / "MuseScore4.exe"
+    exe.write_bytes(b"")
+    return str(exe)
+
+
+def test_requirements_all_present(tmp_path, mscore):
+    assert core.missing_requirements(mscore, make_sampler(tmp_path)) == []
+
+
+def test_requirements_missing_musescore(tmp_path):
+    missing = core.missing_requirements(str(tmp_path / "nope.exe"), make_sampler(tmp_path))
+    assert len(missing) == 1 and "MuseScore 4" in missing[0]
+
+
+def test_requirements_missing_muse_sounds(tmp_path, mscore):
+    missing = core.missing_requirements(mscore, tmp_path / "MuseSampler")
+    assert len(missing) == 1 and "Muse Sounds" in missing[0]
+
+
+def test_requirements_missing_instruments_folder(tmp_path, mscore):
+    sampler = make_sampler(tmp_path)
+    (sampler / ".config").unlink()
+    assert "Instrumente" in core.missing_requirements(mscore, sampler)[0]
+
+
+def test_requirements_missing_pack(tmp_path, mscore):
+    missing = core.missing_requirements(mscore, make_sampler(tmp_path, packs=("Muse Keys",)))
+    assert len(missing) == 1 and "Muse Choir" in missing[0]

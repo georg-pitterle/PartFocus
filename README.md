@@ -30,7 +30,12 @@ Kommandozeile:
 
 ```
 partfocus-cli <datei.mscz | ordner> [--sound=original|choir|piano] [--dry-run]
+              [--mscore=<MuseScore4.exe>] [--sampler=<MuseSampler-Ordner>]
 ```
+
+Standardpfade: `C:\Program Files\MuseScore 4\bin\MuseScore4.exe` und
+`%LOCALAPPDATA%\MuseSampler`. Liegen sie woanders, in der Oberfläche unter
+„Pfade …“ ändern. Fehlt beim Start etwas, warnt PartFocus.
 
 ## Funktionsweise
 

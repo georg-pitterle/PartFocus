@@ -89,6 +89,10 @@ QComboBox {{
     background: {panel}; border: 1px solid {border_strong}; border-radius: 4px; padding: 4px 8px;
 }}
 QComboBox:focus {{ border-color: {accent}; }}
+QLineEdit {{
+    background: {panel}; border: 1px solid {border_strong}; border-radius: 4px; padding: 4px 8px;
+}}
+QLineEdit:focus {{ border-color: {accent}; }}
 QComboBox QAbstractItemView {{
     background: {panel}; border: 1px solid {border_strong};
     selection-background-color: {accent_soft}; selection-color: {text};

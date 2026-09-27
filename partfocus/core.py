@@ -6,10 +6,11 @@ Klang wählbar: Original, Muse Choir (Stimme nach Name/Instrument) oder Grand Pi
 MuseScore-3-Dateien (ohne audiosettings.json) werden vorher mit MuseScore 4 umgewandelt.
 Zwei Durchläufe: erst WAV zum Peak-Messen, dann MP3 mit Master-Gain auf PEAK_DBFS.
 Aufruf:  partfocus-cli [datei.mscz | ordner] [--sound=original|choir|piano] [--dry-run]
+         [--mscore=MuseScore4.exe] [--sampler=MuseSampler-Ordner]
 Ausgabe: <ordner>/<stück>/<stück> - <Stimme>[ (<Klang>)].mp3
 GUI:     partfocus
 """
-import array, json, math, re, struct, subprocess, sys, tempfile, time, zipfile
+import array, json, math, os, re, struct, subprocess, sys, tempfile, time, zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,35 @@ def apply_sound(audio: dict, names: dict[str, str], sound: str) -> dict:
         if res is not None:
             t["in"] = json.loads(json.dumps(res))
     return a
+
+
+def default_sampler() -> Path:
+    """Wo Muse Hub die MuseSampler-Bibliothek installiert."""
+    return Path(os.environ.get("LOCALAPPDATA", "")) / "MuseSampler"
+
+
+def missing_requirements(mscore: str = MSCORE, sampler: Path | None = None) -> list[str]:
+    """Was für den Export fehlt, als Klartext; leer = alles da.
+
+    Muse Sounds = MuseSampler-Bibliothek (von Muse Hub unter %LOCALAPPDATA%\\MuseSampler installiert)
+    plus Instrumente; deren Ordner steht in MuseSampler\\.config. Choir und Keys braucht die Klang-Auswahl.
+    """
+    missing = []
+    if not Path(mscore).is_file():
+        missing.append(f"MuseScore 4 nicht gefunden ({mscore})")
+    sampler = sampler or default_sampler()
+    if not (sampler / "lib" / "MuseSamplerCoreLib.dll").is_file():
+        return missing + ["Muse Sounds nicht installiert (über Muse Hub installieren)"]
+    try:
+        instruments = Path((sampler / ".config").read_text(encoding="utf-8").strip())
+    except OSError:
+        instruments = None
+    if instruments is None or not instruments.is_dir():
+        return missing + ["Keine Muse-Sounds-Instrumente gefunden (über Muse Hub installieren)"]
+    for pack, sound in (("Muse Choir", "Muse Choir"), ("Muse Keys", "Grand Piano")):
+        if not (instruments / pack).is_dir():
+            missing.append(f"{pack} nicht installiert, Klang „{sound}“ klingt nicht wie erwartet")
+    return missing
 
 
 @dataclass
@@ -261,12 +291,18 @@ def main():
     scores = [arg] if arg.is_file() else sorted(arg.glob("*.mscz"))
     if not scores:
         sys.exit(f"Keine .mscz in {arg}")
-    opts = Options()
+    opts, sampler = Options(), None
     for a in sys.argv[1:]:
         if a.startswith("--sound="):
             opts.sound = a.split("=", 1)[1]
             if opts.sound not in SOUNDS:
                 sys.exit(f"--sound muss einer von {', '.join(SOUNDS)} sein")
+        elif a.startswith("--mscore="):
+            opts.mscore = a.split("=", 1)[1]
+        elif a.startswith("--sampler="):
+            sampler = Path(a.split("=", 1)[1])
+    for m in missing_requirements(opts.mscore, sampler):
+        print(f"Warnung: {m}", file=sys.stderr)
     if "--dry-run" in sys.argv:
         with tempfile.TemporaryDirectory() as td:
             jobs = [{"in": j["in"], "out": j["out"]} for s in scores for j in plan(s, Path(td), opts)]
