@@ -196,6 +196,35 @@ def test_wav_peak_negative_peak(tmp_path):
     assert core.wav_peak(wav) == pytest.approx(0.9)
 
 
+def fake_render(calls):
+    def render(jobs, jobfile, opts, tick=lambda n: None, cancelled=lambda: False):
+        calls.append([Path(j["out"]).suffix for j in jobs])
+        for j in jobs:
+            out = Path(j["out"])
+            if out.suffix == ".wav":
+                write_float_wav(out, [0.25, -0.5])
+            else:
+                out.write_bytes(b"mp3")
+    return render
+
+
+def test_export_measures_peak_with_original_dynamics(ms4, monkeypatch):
+    calls = []
+    monkeypatch.setattr(core, "render", fake_render(calls))
+    results = core.export([ms4], core.Options(flat_dynamic=None))
+    assert calls == [[".wav"] * 4, [".mp3"] * 4]
+    assert results[0].gain == pytest.approx(core.PEAK_DBFS + 6.0206, abs=1e-3)
+    assert all(r.ok for r in results)
+
+
+def test_export_skips_measuring_with_flat_dynamics(ms4, monkeypatch):
+    calls = []
+    monkeypatch.setattr(core, "render", fake_render(calls))
+    results = core.export([ms4], core.Options(flat_dynamic="mf"))
+    assert calls == [[".mp3"] * 4]
+    assert all(r.ok and r.peak_db is None and r.gain == 0.0 for r in results)
+
+
 # --- Voraussetzungen ---------------------------------------------------------
 
 def make_sampler(tmp_path: Path, packs=("Muse Choir", "Muse Keys")) -> Path:

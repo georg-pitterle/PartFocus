@@ -7,7 +7,7 @@ MP3, in der diese Stimme vorne steht und die anderen leiser mitlaufen, dazu ein
 - Lautstärke der anderen Stimmen einstellbar (−40 bis −5 dB)
 - Dynamik wahlweise eingeebnet, damit leise Stellen hörbar bleiben
 - Klang: Original, Muse Choir oder Grand Piano
-- alle Tracks auf −1 dBFS normalisiert, nichts übersteuert
+- mit Original-Dynamik alle Tracks auf −1 dBFS normalisiert, nichts übersteuert
 - auch für MuseScore-3-Dateien
 
 ## Voraussetzungen
@@ -56,8 +56,9 @@ Original bleibt unverändert.
   Sie werden zuerst mit `MuseScore4.exe -o` umgewandelt. Die fehlenden
   Track-Einträge legt PartFocus ohne `in` an, dann wählt MuseScore den Klang
   wie beim normalen Öffnen.
-- **Rendern** in zwei Durchläufen mit je einem Aufruf
-  `MuseScore4.exe -j job.json --sound-profile "Muse Sounds"`:
+- **Rendern** mit `MuseScore4.exe -j job.json --sound-profile "Muse Sounds"`.
+  Mit eingeebneter Dynamik ist der Pegel fest: ein Durchlauf, MP3 mit 192 kbps,
+  `master.volumeDb` bleibt 0 dB. Mit Original-Dynamik zwei Durchläufe:
   1. WAV rendern und den Spitzenpegel messen
   2. `master.volumeDb` so setzen, dass die Spitze bei −1 dBFS liegt (Boost
      höchstens +24 dB), dann MP3 mit 192 kbps rendern

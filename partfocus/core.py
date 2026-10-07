@@ -4,7 +4,8 @@ Pro Stimme eine MP3 (Zielstimme 0 dB, Rest Options.others_db) plus "Gesamt" (all
 Dynamik wird eingeebnet: alle Dynamikzeichen -> Options.flat_dynamic, Gabeln entfernt.
 Klang wählbar: Original, Muse Choir (Stimme nach Name/Instrument) oder Grand Piano für alle.
 MuseScore-3-Dateien (ohne audiosettings.json) werden vorher mit MuseScore 4 umgewandelt.
-Zwei Durchläufe: erst WAV zum Peak-Messen, dann MP3 mit Master-Gain auf PEAK_DBFS.
+Mit Original-Dynamik zwei Durchläufe: erst WAV zum Peak-Messen, dann MP3 mit Master-Gain auf PEAK_DBFS.
+Mit eingeebneter Dynamik ist der Pegel fest: nur MP3, Master 0 dB.
 Aufruf:  partfocus-cli [datei.mscz | ordner] [--sound=original|choir|piano] [--dry-run]
          [--mscore=MuseScore4.exe] [--sampler=MuseSampler-Ordner]
 Ausgabe: <ordner>/<stück>/<stück> - <Stimme>[ (<Klang>)].mp3
@@ -105,12 +106,12 @@ class Options:
 @dataclass
 class Result:
     out: Path
-    peak_db: float
+    peak_db: float | None  # None = nicht gemessen
     gain: float
 
     @property
     def ok(self) -> bool:
-        return self.out.exists() and self.peak_db > -60
+        return self.out.exists() and (self.peak_db is None or self.peak_db > -60)
 
 
 class Cancelled(Exception):
@@ -266,22 +267,27 @@ def export(scores: list[Path], opts: Options,
             if cancelled():
                 raise Cancelled()
             jobs += plan(s, Path(td), opts)
-        total = 2 * len(jobs)
+        # Eingeebnete Dynamik heißt fester Pegel: kein Messdurchlauf, Master bleibt bei 0 dB.
+        measure = opts.flat_dynamic is None
+        measured = len(jobs) if measure else 0
+        total = measured + len(jobs)
         for j in jobs:
             Path(j["out"]).parent.mkdir(exist_ok=True)
             write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts)
+            j["peak_db"], j["gain"] = None, 0.0
         jobfile = Path(td) / "job.json"
-        progress(f"Pegel messen ({len(jobs)} Tracks)", 0, total)
-        render([{"in": j["in"], "out": j["wav"]} for j in jobs], jobfile, opts,
-               lambda n: progress(f"Pegel messen ({len(jobs)} Tracks)", n, total), cancelled)
-        for j in jobs:
-            peak = wav_peak(Path(j["wav"]))
-            j["peak_db"] = 20 * math.log10(peak) if peak > 0 else -math.inf
-            j["gain"] = min(MAX_GAIN_DB, PEAK_DBFS - j["peak_db"])
-            write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts, j["gain"])
-        progress("MP3s rendern", len(jobs), total)
+        if measure:
+            progress(f"Pegel messen ({len(jobs)} Tracks)", 0, total)
+            render([{"in": j["in"], "out": j["wav"]} for j in jobs], jobfile, opts,
+                   lambda n: progress(f"Pegel messen ({len(jobs)} Tracks)", n, total), cancelled)
+            for j in jobs:
+                peak = wav_peak(Path(j["wav"]))
+                j["peak_db"] = 20 * math.log10(peak) if peak > 0 else -math.inf
+                j["gain"] = min(MAX_GAIN_DB, PEAK_DBFS - j["peak_db"])
+                write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts, j["gain"])
+        progress("MP3s rendern", measured, total)
         render([{"in": j["in"], "out": j["out"]} for j in jobs], jobfile, opts,
-               lambda n: progress("MP3s rendern", len(jobs) + n, total), cancelled)
+               lambda n: progress("MP3s rendern", measured + n, total), cancelled)
     return [Result(Path(j["out"]), j["peak_db"], j["gain"]) for j in jobs]
 
 
@@ -314,7 +320,8 @@ def main():
             print(f"{text} ..."); last[0] = text
 
     for r in export(scores, opts, progress):
-        print(f"{'OK ' if r.ok else '?? '}Peak {r.peak_db:6.1f} dBFS  Gain {r.gain:+5.1f} dB  {r.out.name}")
+        level = "" if r.peak_db is None else f"Peak {r.peak_db:6.1f} dBFS  Gain {r.gain:+5.1f} dB  "
+        print(f"{'OK ' if r.ok else '?? '}{level}{r.out.name}")
 
 
 if __name__ == "__main__":
