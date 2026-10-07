@@ -130,8 +130,10 @@ class Window(QWidget):
 
         # Einstellungen
         options = QWidget(objectName="Options")
-        op = QHBoxLayout(options)
-        op.setContentsMargins(12, 10, 12, 10)
+        rows = QVBoxLayout(options)
+        rows.setContentsMargins(12, 10, 12, 10)
+        rows.setSpacing(8)
+        op = QHBoxLayout()
         op.setSpacing(10)
         self.others = QSlider(Qt.Horizontal, minimum=-40, maximum=-5, singleStep=1, pageStep=5)
         self.others.setValue(int(self.settings.value("others_db", -25)))
@@ -161,6 +163,25 @@ class Window(QWidget):
         op.addSpacing(16)
         op.addWidget(QLabel("Klang"))
         op.addWidget(self.sound)
+        tp = QHBoxLayout()
+        tp.setSpacing(6)
+        tempo_label = QLabel("Tempo")
+        tempo_label.setToolTip("Eine Fassung pro gewähltem Tempo, in Prozent vom Original")
+        tp.addWidget(tempo_label)
+        tp.addSpacing(4)
+        saved = {int(t) for t in str(self.settings.value("tempos", "100")).split(",") if t.strip().isdigit()}
+        self.tempo_btns: dict[int, QPushButton] = {}
+        for t in core.TEMPOS:
+            b = QPushButton(f"{t} %", objectName="Chip", checkable=True)
+            b.setChecked(t in saved)
+            b.toggled.connect(lambda on, b=b: self.tempo_toggled(b, on))
+            self.tempo_btns[t] = b
+            tp.addWidget(b)
+        if not self.tempos():
+            self.tempo_btns[100].setChecked(True)
+        tp.addStretch()
+        rows.addLayout(op)
+        rows.addLayout(tp)
 
         # Statuszeile
         status = QWidget(objectName="StatusBar")
@@ -316,24 +337,35 @@ class Window(QWidget):
     def show_others(self, value: int):
         self.others_label.setText(f"{value} dB")
 
+    def tempos(self) -> tuple[int, ...]:
+        return tuple(t for t, b in self.tempo_btns.items() if b.isChecked())
+
+    def tempo_toggled(self, button: QPushButton, on: bool):
+        if not on and not self.tempos():
+            button.setChecked(True)  # mindestens ein Tempo
+            return
+        self.status.setText("")
+        self.update_buttons()
+
     def update_buttons(self):
         busy = self.worker is not None
         self.stack.setCurrentIndex(1 if self.list.count() else 0)
         self.remove_btn.setEnabled(not busy and bool(self.list.selectedItems()))
         self.start_btn.setEnabled(busy or self.list.count() > 0)
         self.start_btn.setText("Abbrechen" if busy else "Tracks erstellen")
-        for w in (self.others, self.dynamic, self.sound, self.list, self.paths_btn):
+        for w in (self.others, self.dynamic, self.sound, self.list, self.paths_btn, *self.tempo_btns.values()):
             w.setEnabled(not busy)
         # Kein Neustart mitten im Rendern: MuseScore liefe verwaist weiter.
         self.update_btn.setEnabled(not busy)
         if not busy and not self.status.text() and self.list.count():
-            n = sum(self.list.item(i).data(Qt.UserRole + 1) for i in range(self.list.count()))
+            n = sum(self.list.item(i).data(Qt.UserRole + 1) for i in range(self.list.count())) * len(self.tempos())
             self.status.setText(f"{self.list.count()} Partitur(en), {n} Tracks")
 
     def save_settings(self):
         self.settings.setValue("others_db", self.others.value())
         self.settings.setValue("dynamic", self.dynamic.currentData() or "")
         self.settings.setValue("sound", self.sound.currentData())
+        self.settings.setValue("tempos", ",".join(map(str, self.tempos())))
         self.settings.setValue("scores", [str(s) for s in self.scores()])
 
     # --- Rendern ----------------------------------------------------------
@@ -350,7 +382,7 @@ class Window(QWidget):
             return
         self.save_settings()
         opts = core.Options(others_db=float(self.others.value()), flat_dynamic=self.dynamic.currentData(),
-                                 sound=self.sound.currentData(), mscore=self.mscore())
+                                 sound=self.sound.currentData(), tempos=self.tempos(), mscore=self.mscore())
         scores = [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
                   if self.list.item(i).data(Qt.UserRole + 1)]
         if not scores:

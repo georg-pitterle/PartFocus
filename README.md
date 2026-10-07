@@ -7,6 +7,7 @@ MP3, in der diese Stimme vorne steht und die anderen leiser mitlaufen, dazu ein
 - Lautstärke der anderen Stimmen einstellbar (−40 bis −5 dB)
 - Dynamik wahlweise eingeebnet, damit leise Stellen hörbar bleiben
 - Klang: Original, Muse Choir oder Grand Piano
+- Tempo: 100 % bis 50 % in 10-%-Schritten, auch mehrere Fassungen auf einmal
 - mit Original-Dynamik alle Tracks auf −1 dBFS normalisiert, nichts übersteuert
 - auch für MuseScore-3-Dateien
 
@@ -29,7 +30,7 @@ Die MP3s landen neben der Partitur im Ordner `<Stück>/`.
 Kommandozeile:
 
 ```
-partfocus-cli <datei.mscz | ordner> [--sound=original|choir|piano] [--dry-run]
+partfocus-cli <datei.mscz | ordner> [--sound=original|choir|piano] [--tempo=100,80] [--dry-run]
               [--mscore=<MuseScore4.exe>] [--sampler=<MuseSampler-Ordner>]
 ```
 
@@ -52,6 +53,12 @@ Original bleibt unverändert.
   Alt → Altos, Tenor → Tenors, Bariton/Bass → Basses. Andere Instrumente bleiben
   original. Die Dateinamen bekommen dann den Zusatz „(Muse Choir)“ bzw.
   „(Grand Piano)“.
+- **Tempo:** Jeder `<tempo>`-Wert der Tempoangaben wird mit dem Prozentsatz
+  multipliziert. rit./accel. sind relativ und skalieren mit. Beginnt die Partitur
+  ohne Tempoangabe, kommt eine unsichtbare mit 120 BPM (MuseScore-Standard) dazu.
+  Weil MuseScore die Noten langsamer spielt, bleibt die Tonhöhe gleich. Fassungen
+  unter 100 % bekommen den Zusatz „(80%)“. Gemessen wird nur die schnellste
+  gewählte Fassung, die langsameren übernehmen ihren Pegel.
 - **MuseScore-3-Dateien** haben keine `audiosettings.json` und keine Part-IDs.
   Sie werden zuerst mit `MuseScore4.exe -o` umgewandelt. Die fehlenden
   Track-Einträge legt PartFocus ohne `in` an, dann wählt MuseScore den Klang

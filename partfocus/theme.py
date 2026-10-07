@@ -80,6 +80,10 @@ QPushButton#Primary:hover {{ background: {accent_hover}; border-color: {accent_h
 QPushButton#Primary:disabled {{ background: transparent; color: {text_muted}; border: 1px solid {border}; }}
 QPushButton#Quiet {{ border: 1px solid {border}; }}
 QPushButton#Quiet:hover {{ border-color: {border_strong}; background: {accent_soft}; }}
+QPushButton#Chip {{ border: 1px solid {border}; padding: 4px 10px; font-family: {font_mono}; }}
+QPushButton#Chip:hover {{ border-color: {border_strong}; background: {accent_soft}; }}
+QPushButton#Chip:checked {{ background: {accent_soft}; border-color: {accent}; }}
+QPushButton#Chip:checked:disabled {{ color: {text_muted}; border-color: {border_strong}; }}
 
 QListWidget {{ background: {panel}; border: none; outline: none; }}
 QListWidget::item {{ border-bottom: 1px solid {border}; padding: 6px 10px; }}

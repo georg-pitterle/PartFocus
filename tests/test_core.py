@@ -93,6 +93,47 @@ def test_flatten_dynamics_keeps_xml_valid():
     ET.fromstring(core.flatten_dynamics(MSCX_MS4, "p"))
 
 
+# --- Tempo -----------------------------------------------------------------
+
+MSCX_TEMPO = """<museScore version="4.70"><Score>
+  <Staff id="1">
+    <Measure><voice>
+      <TimeSig><sigN>3</sigN><sigD>4</sigD></TimeSig>
+      <Tempo><tempo>2</tempo><text>= 120</text></Tempo>
+      <Rest><durationType>measure</durationType></Rest>
+      </voice></Measure>
+    <Measure><voice>
+      <Tempo><tempo>0.833333</tempo><text>= 50</text></Tempo>
+      <Chord><durationType>quarter</durationType></Chord>
+      </voice></Measure>
+  </Staff>
+</Score></museScore>
+"""
+
+
+def test_slow_tempo_scales_every_tempo_marking():
+    slow = core.slow_tempo(MSCX_TEMPO, 80)
+    assert "<tempo>1.6</tempo>" in slow
+    assert "<tempo>0.666666</tempo>" in slow  # 0.833333 * 0.8
+    assert slow.count("<Tempo>") == 2
+
+
+def test_slow_tempo_adds_hidden_marking_when_score_starts_without_one():
+    import xml.etree.ElementTree as ET
+
+    mscx = MSCX_TEMPO.replace("<Tempo><tempo>2</tempo><text>= 120</text></Tempo>", "")
+    slow = core.slow_tempo(mscx, 80)
+    first = ET.fromstring(slow).find(".//Measure/voice")
+    tempo = first.find("Tempo")
+    assert float(tempo.findtext("tempo")) == pytest.approx(1.6)  # 120 BPM ist der MuseScore-Standard
+    assert tempo.findtext("visible") == "0"
+    assert [e.tag for e in first].index("Tempo") < [e.tag for e in first].index("Rest")
+
+
+def test_slow_tempo_keeps_full_speed_untouched():
+    assert core.slow_tempo(MSCX_TEMPO, 100) == MSCX_TEMPO
+
+
 # --- Stimmen ---------------------------------------------------------------
 
 def test_voices_skip_metronome_and_start_with_gesamt(ms4):
@@ -141,6 +182,14 @@ def test_write_variant_keeps_dynamics_when_asked(ms4, tmp_path):
     assert "<subtype>pp</subtype>" in read_variant(dst)[1]
 
 
+def test_write_variant_slows_tempo(tmp_path):
+    audio = {"master": {"volumeDb": 0}, "tracks": []}
+    score = make_score(tmp_path / "T.mscz", MSCX_TEMPO, audio)
+    dst = tmp_path / "v.mscz"
+    core.write_variant(score, dst, audio, None, core.Options(), tempo=70)
+    assert "<tempo>1.4</tempo>" in read_variant(dst)[1]
+
+
 # --- Klang -----------------------------------------------------------------
 
 @pytest.mark.parametrize("iid, name, expected", [
@@ -172,6 +221,17 @@ def test_plan_names_outputs_with_sound_suffix(ms4, tmp_path):
     assert [Path(j["out"]).name for j in jobs][:2] == ["Lied - Gesamt (Grand Piano).mp3",
                                                       "Lied - Sopran 1 (Grand Piano).mp3"]
     assert Path(jobs[0]["out"]).parent == ms4.parent / "Lied"
+
+
+def test_plan_adds_slower_versions(ms4, tmp_path):
+    jobs = core.plan(ms4, tmp_path, core.Options(sound="choir", tempos=(100, 80, 60)))
+    names = [Path(j["out"]).name for j in jobs]
+    assert len(names) == 12 and len(set(names)) == 12
+    assert len({j["in"] for j in jobs}) == 12
+    assert names[0] == "Lied - Gesamt (Muse Choir).mp3"
+    assert "Lied - Alt (Muse Choir) (80%).mp3" in names
+    assert "Lied - Klavier (Muse Choir) (60%).mp3" in names
+    assert sorted(j["tempo"] for j in jobs) == [60] * 4 + [80] * 4 + [100] * 4
 
 
 # --- Pegel -----------------------------------------------------------------
@@ -223,6 +283,21 @@ def test_export_skips_measuring_with_flat_dynamics(ms4, monkeypatch):
     results = core.export([ms4], core.Options(flat_dynamic="mf"))
     assert calls == [[".mp3"] * 4]
     assert all(r.ok and r.peak_db is None and r.gain == 0.0 for r in results)
+
+
+def test_plan_without_full_speed(ms4, tmp_path):
+    jobs = core.plan(ms4, tmp_path, core.Options(tempos=(70,)))
+    assert [Path(j["out"]).name for j in jobs] == ["Lied - Gesamt (70%).mp3", "Lied - Sopran 1 (70%).mp3",
+                                                   "Lied - Alt (70%).mp3", "Lied - Klavier (70%).mp3"]
+
+
+def test_export_measures_only_fastest_tempo_and_reuses_gain(ms4, monkeypatch):
+    calls = []
+    monkeypatch.setattr(core, "render", fake_render(calls))
+    results = core.export([ms4], core.Options(flat_dynamic=None, tempos=(80, 60)))
+    assert calls == [[".wav"] * 4, [".mp3"] * 8]
+    assert len({r.gain for r in results}) == 1 and results[0].gain != 0.0
+    assert all(r.ok for r in results)
 
 
 # --- Voraussetzungen ---------------------------------------------------------

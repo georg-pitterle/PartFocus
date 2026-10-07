@@ -6,9 +6,11 @@ Klang wählbar: Original, Muse Choir (Stimme nach Name/Instrument) oder Grand Pi
 MuseScore-3-Dateien (ohne audiosettings.json) werden vorher mit MuseScore 4 umgewandelt.
 Mit Original-Dynamik zwei Durchläufe: erst WAV zum Peak-Messen, dann MP3 mit Master-Gain auf PEAK_DBFS.
 Mit eingeebneter Dynamik ist der Pegel fest: nur MP3, Master 0 dB.
-Aufruf:  partfocus-cli [datei.mscz | ordner] [--sound=original|choir|piano] [--dry-run]
+Tempo wählbar, auch mehrere Fassungen auf einmal (Options.tempos, Prozent vom Original); gemessen wird
+nur die schnellste, die anderen übernehmen ihren Pegel.
+Aufruf:  partfocus-cli [datei.mscz | ordner] [--sound=original|choir|piano] [--tempo=100,80] [--dry-run]
          [--mscore=MuseScore4.exe] [--sampler=MuseSampler-Ordner]
-Ausgabe: <ordner>/<stück>/<stück> - <Stimme>[ (<Klang>)].mp3
+Ausgabe: <ordner>/<stück>/<stück> - <Stimme>[ (<Klang>)][ (<Tempo>%)].mp3
 GUI:     partfocus
 """
 import array, json, math, os, re, struct, subprocess, sys, tempfile, time, zipfile
@@ -21,6 +23,8 @@ MSCORE = r"C:\Program Files\MuseScore 4\bin\MuseScore4.exe"
 TARGET_DB = 0.0
 PEAK_DBFS = -1.0
 MAX_GAIN_DB = 24.0
+DEFAULT_TEMPO = 2.0  # Viertel pro Sekunde = 120 BPM, wenn die Partitur keine Tempoangabe hat
+TEMPOS = (100, 90, 80, 70, 60, 50)  # wählbare Tempi in Prozent vom Original
 VELOCITY = {"ppp": 16, "pp": 33, "p": 49, "mp": 64, "mf": 80, "f": 96, "ff": 112, "fff": 126}
 
 
@@ -99,6 +103,7 @@ class Options:
     others_db: float = -25.0
     flat_dynamic: str | None = "mf"  # None = Original-Dynamik behalten
     sound: str = "original"  # Schlüssel aus SOUNDS
+    tempos: tuple[int, ...] = (100,)  # eine Fassung pro Tempo, Prozent vom Original
     bitrate: int = 192
     mscore: str = MSCORE
 
@@ -169,7 +174,29 @@ def flatten_dynamics(mscx: str, level: str) -> str:
     return re.sub(r"(<Dynamic>.*?<velocity>)\d+(</velocity>)", rf"\g<1>{VELOCITY[level]}\g<2>", mscx, flags=re.S)
 
 
-def write_variant(src: Path, dst: Path, audio: dict, target: str | None, opts: Options, master_db: float = 0.0):
+def slow_tempo(mscx: str, percent: int) -> str:
+    """Alle Tempoangaben auf `percent` Prozent; Gabeln wie rit./accel. sind relativ und skalieren mit.
+
+    Beginnt die Partitur ohne Tempoangabe, spielt MuseScore 120 BPM; dafür kommt eine
+    unsichtbare Angabe vor den ersten Akkord bzw. die erste Pause.
+    """
+    if percent == 100:
+        return mscx
+    factor = percent / 100
+    first = re.search(r"<Measure\b.*?</Measure>", mscx, flags=re.S)
+    if first and "<Tempo>" not in first.group(0):
+        # Originaltempo einfügen, skaliert wird es unten mit allen anderen.
+        hidden = (f"<Tempo><tempo>{DEFAULT_TEMPO:g}</tempo><visible>0</visible>"
+                  f"<text><sym>metNoteQuarterUp</sym> = {DEFAULT_TEMPO * 60:g}</text></Tempo>")
+        rest = re.compile(r"<(?:Chord|Rest)>").search(mscx, first.start(), first.end())
+        if rest:
+            mscx = mscx[:rest.start()] + hidden + mscx[rest.start():]
+    return re.sub(r"(<Tempo>.*?<tempo>)([\d.]+)(</tempo>)",
+                  lambda m: f"{m[1]}{float(m[2]) * factor:.6g}{m[3]}", mscx, flags=re.S)
+
+
+def write_variant(src: Path, dst: Path, audio: dict, target: str | None, opts: Options, master_db: float = 0.0,
+                  tempo: int = 100):
     a = json.loads(json.dumps(audio))
     a["master"]["volumeDb"] = master_db
     for t in a["tracks"]:
@@ -182,8 +209,11 @@ def write_variant(src: Path, dst: Path, audio: dict, target: str | None, opts: O
             data = zin.read(item.filename)
             if item.filename == "audiosettings.json":
                 data = json.dumps(a, indent=4).encode()
-            elif opts.flat_dynamic and item.filename.endswith(".mscx") and "/" not in item.filename:
-                data = flatten_dynamics(data.decode("utf-8"), opts.flat_dynamic).encode("utf-8")
+            elif item.filename.endswith(".mscx") and "/" not in item.filename:
+                mscx = data.decode("utf-8")
+                if opts.flat_dynamic:
+                    mscx = flatten_dynamics(mscx, opts.flat_dynamic)
+                data = slow_tempo(mscx, tempo).encode("utf-8")
             zout.writestr(item, data)
 
 
@@ -248,11 +278,14 @@ def plan(score: Path, tmp: Path, opts: Options) -> list[dict]:
     with zipfile.ZipFile(source) as z:
         audio = apply_sound(audio, part_names(z), opts.sound)
     jobs = []
-    for label, pid in voices(source):
-        v = tmp / f"{safe(score.stem)}__{safe(label)}.mscz"
-        suffix = "" if opts.sound == "original" else f" ({SOUNDS[opts.sound]})"
-        jobs.append({"in": str(v), "out": str(out_dir / f"{safe(score.stem)} - {safe(label)}{suffix}.mp3"),
-                     "wav": str(v.with_suffix(".wav")), "score": source, "audio": audio, "pid": pid})
+    for tempo in sorted(set(opts.tempos), reverse=True):
+        for label, pid in voices(source):
+            v = tmp / f"{safe(score.stem)}__{safe(label)}__{tempo}.mscz"
+            suffix = "" if opts.sound == "original" else f" ({SOUNDS[opts.sound]})"
+            suffix += "" if tempo == 100 else f" ({tempo}%)"
+            jobs.append({"in": str(v), "out": str(out_dir / f"{safe(score.stem)} - {safe(label)}{suffix}.mp3"),
+                         "wav": str(v.with_suffix(".wav")), "score": source, "audio": audio, "pid": pid,
+                         "tempo": tempo, "key": (str(score), pid)})
     return jobs
 
 
@@ -268,23 +301,27 @@ def export(scores: list[Path], opts: Options,
                 raise Cancelled()
             jobs += plan(s, Path(td), opts)
         # Eingeebnete Dynamik heißt fester Pegel: kein Messdurchlauf, Master bleibt bei 0 dB.
-        measure = opts.flat_dynamic is None
-        measured = len(jobs) if measure else 0
+        # Gemessen wird nur die schnellste Fassung, die langsameren übernehmen ihren Pegel.
+        probes = [j for j in jobs if j["tempo"] == max(opts.tempos)] if opts.flat_dynamic is None else []
+        measured = len(probes)
         total = measured + len(jobs)
         for j in jobs:
             Path(j["out"]).parent.mkdir(exist_ok=True)
-            write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts)
+            write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts, tempo=j["tempo"])
             j["peak_db"], j["gain"] = None, 0.0
         jobfile = Path(td) / "job.json"
-        if measure:
-            progress(f"Pegel messen ({len(jobs)} Tracks)", 0, total)
-            render([{"in": j["in"], "out": j["wav"]} for j in jobs], jobfile, opts,
-                   lambda n: progress(f"Pegel messen ({len(jobs)} Tracks)", n, total), cancelled)
-            for j in jobs:
+        if probes:
+            progress(f"Pegel messen ({measured} Tracks)", 0, total)
+            render([{"in": j["in"], "out": j["wav"]} for j in probes], jobfile, opts,
+                   lambda n: progress(f"Pegel messen ({measured} Tracks)", n, total), cancelled)
+            levels = {}
+            for j in probes:
                 peak = wav_peak(Path(j["wav"]))
-                j["peak_db"] = 20 * math.log10(peak) if peak > 0 else -math.inf
-                j["gain"] = min(MAX_GAIN_DB, PEAK_DBFS - j["peak_db"])
-                write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts, j["gain"])
+                peak_db = 20 * math.log10(peak) if peak > 0 else -math.inf
+                levels[j["key"]] = peak_db, min(MAX_GAIN_DB, PEAK_DBFS - peak_db)
+            for j in jobs:
+                j["peak_db"], j["gain"] = levels[j["key"]]
+                write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts, j["gain"], j["tempo"])
         progress("MP3s rendern", measured, total)
         render([{"in": j["in"], "out": j["out"]} for j in jobs], jobfile, opts,
                lambda n: progress("MP3s rendern", measured + n, total), cancelled)
@@ -303,6 +340,10 @@ def main():
             opts.sound = a.split("=", 1)[1]
             if opts.sound not in SOUNDS:
                 sys.exit(f"--sound muss einer von {', '.join(SOUNDS)} sein")
+        elif a.startswith("--tempo="):
+            opts.tempos = tuple(int(t) for t in a.split("=", 1)[1].split(",") if t.strip())
+            if not opts.tempos or not all(0 < t <= 100 for t in opts.tempos):
+                sys.exit("--tempo erwartet Prozentwerte bis 100, z. B. --tempo=100,80")
         elif a.startswith("--mscore="):
             opts.mscore = a.split("=", 1)[1]
         elif a.startswith("--sampler="):
