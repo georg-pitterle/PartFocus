@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QSlider,
     QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -163,6 +163,12 @@ class Window(QWidget):
         op.addSpacing(16)
         op.addWidget(QLabel("Klang"))
         op.addWidget(self.sound)
+        self.unison = QCheckBox("Unisono einfach")
+        self.unison.setChecked(self.settings.value("merge_unison", "true") in (True, "true"))
+        self.unison.setToolTip("Singen mehrere Stimmen denselben Ton, erklingt er nur einmal,\n"
+                               "damit Unisono-Stellen nicht lauter werden")
+        op.addSpacing(16)
+        op.addWidget(self.unison)
         tp = QHBoxLayout()
         tp.setSpacing(6)
         tempo_label = QLabel("Tempo")
@@ -353,7 +359,7 @@ class Window(QWidget):
         self.remove_btn.setEnabled(not busy and bool(self.list.selectedItems()))
         self.start_btn.setEnabled(busy or self.list.count() > 0)
         self.start_btn.setText("Abbrechen" if busy else "Tracks erstellen")
-        for w in (self.others, self.dynamic, self.sound, self.list, self.paths_btn, *self.tempo_btns.values()):
+        for w in (self.others, self.dynamic, self.sound, self.unison, self.list, self.paths_btn, *self.tempo_btns.values()):
             w.setEnabled(not busy)
         # Kein Neustart mitten im Rendern: MuseScore liefe verwaist weiter.
         self.update_btn.setEnabled(not busy)
@@ -365,6 +371,7 @@ class Window(QWidget):
         self.settings.setValue("others_db", self.others.value())
         self.settings.setValue("dynamic", self.dynamic.currentData() or "")
         self.settings.setValue("sound", self.sound.currentData())
+        self.settings.setValue("merge_unison", self.unison.isChecked())
         self.settings.setValue("tempos", ",".join(map(str, self.tempos())))
         self.settings.setValue("scores", [str(s) for s in self.scores()])
 
@@ -382,7 +389,8 @@ class Window(QWidget):
             return
         self.save_settings()
         opts = core.Options(others_db=float(self.others.value()), flat_dynamic=self.dynamic.currentData(),
-                                 sound=self.sound.currentData(), tempos=self.tempos(), mscore=self.mscore())
+                                 sound=self.sound.currentData(), tempos=self.tempos(), mscore=self.mscore(),
+                                 merge_unison=self.unison.isChecked())
         scores = [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
                   if self.list.item(i).data(Qt.UserRole + 1)]
         if not scores:

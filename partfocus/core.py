@@ -8,14 +8,16 @@ Mit Original-Dynamik zwei Durchläufe: erst WAV zum Peak-Messen, dann MP3 mit Ma
 Mit eingeebneter Dynamik ist der Pegel fest: nur MP3, Master 0 dB.
 Tempo wählbar, auch mehrere Fassungen auf einmal (Options.tempos, Prozent vom Original); gemessen wird
 nur die schnellste, die anderen übernehmen ihren Pegel.
+Unisono: singen mehrere Parts denselben Ton, erklingt er nur einmal (Options.merge_unison).
 Aufruf:  partfocus-cli [datei.mscz | ordner] [--sound=original|choir|piano] [--tempo=100,80] [--dry-run]
-         [--mscore=MuseScore4.exe] [--sampler=MuseSampler-Ordner]
+         [--keep-unison] [--mscore=MuseScore4.exe] [--sampler=MuseSampler-Ordner]
 Ausgabe: <ordner>/<stück>/<stück> - <Stimme>[ (<Klang>)][ (<Tempo>%)].mp3
 GUI:     partfocus
 """
 import array, json, math, os, re, struct, subprocess, sys, tempfile, time, zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
@@ -104,6 +106,7 @@ class Options:
     flat_dynamic: str | None = "mf"  # None = Original-Dynamik behalten
     sound: str = "original"  # Schlüssel aus SOUNDS
     tempos: tuple[int, ...] = (100,)  # eine Fassung pro Tempo, Prozent vom Original
+    merge_unison: bool = True  # gleicher Ton in mehreren Parts erklingt nur einmal
     bitrate: int = 192
     mscore: str = MSCORE
 
@@ -195,6 +198,98 @@ def slow_tempo(mscx: str, percent: int) -> str:
                   lambda m: f"{m[1]}{float(m[2]) * factor:.6g}{m[3]}", mscx, flags=re.S)
 
 
+DURATIONS = {"long": Fraction(4), "breve": Fraction(2), "whole": Fraction(1), "half": Fraction(1, 2),
+             "quarter": Fraction(1, 4), "eighth": Fraction(1, 8), "16th": Fraction(1, 16),
+             "32nd": Fraction(1, 32), "64th": Fraction(1, 64), "128th": Fraction(1, 128),
+             "256th": Fraction(1, 256), "512th": Fraction(1, 512), "1024th": Fraction(1, 1024)}
+GRACE = {"acciaccatura", "appoggiatura", "grace4", "grace16", "grace32", "grace8after", "grace16after",
+         "grace32after"}
+
+
+def _sounding_notes(root: ET.Element):
+    """(System-Nr., Start, Ende, Tonhöhe, [Notennummern]) pro erklingendem Ton.
+
+    Gebundene Noten sind ein Ton. Notennummer = Position unter allen <Note> im Dokument.
+    Vorschläge und Noten mit <play>0</play> zählen nicht.
+    """
+    number = {id(n): i for i, n in enumerate(root.iter("Note"))}
+    sig = Fraction(4, 4)
+    for el in root.iter("TimeSig"):  # Taktart vor dem ersten Takt (falls schon im Kopf)
+        sig = Fraction(int(el.findtext("sigN")), int(el.findtext("sigD")))
+        break
+    for staff_no, staff in enumerate(root.find("Score").findall("Staff"), 1):
+        start, measure_sig, open_ties, tones = Fraction(0), sig, {}, []
+        for measure in staff.findall("Measure"):
+            for voice_no, voice in enumerate(measure.findall("voice")):
+                tick, ratio = start, [Fraction(1)]
+                for el in voice:
+                    if el.tag == "TimeSig":
+                        measure_sig = Fraction(int(el.findtext("sigN")), int(el.findtext("sigD")))
+                    elif el.tag == "Tuplet":
+                        ratio.append(ratio[-1] * int(el.findtext("normalNotes")) / int(el.findtext("actualNotes")))
+                    elif el.tag == "endTuplet":
+                        ratio.pop()
+                    elif el.tag == "location":
+                        tick += Fraction(el.findtext("fractions", "0"))
+                    elif el.tag in ("Chord", "Rest"):
+                        if any(c.tag in GRACE for c in el):
+                            continue
+                        kind = el.findtext("durationType")
+                        if kind == "measure":
+                            length = Fraction(el.findtext("duration", str(measure_sig)))
+                        else:
+                            dots = int(el.findtext("dots", "0"))
+                            length = DURATIONS[kind] * (2 - Fraction(1, 2 ** dots)) * ratio[-1]
+                        for note in el.findall("Note") if el.tag == "Chord" else ():
+                            if note.findtext("play") == "0":
+                                continue
+                            pitch = int(note.findtext("pitch"))
+                            tied_on = any(s.find("next") is not None for s in note.findall("Spanner[@type='Tie']"))
+                            tone = open_ties.pop((voice_no, tick, pitch), None)
+                            if tone is None:
+                                tone = [staff_no, tick, tick + length, pitch, []]
+                                tones.append(tone)
+                            tone[2] = tick + length
+                            tone[4].append(number[id(note)])
+                            if tied_on:
+                                open_ties[(voice_no, tick + length, pitch)] = tone
+                        tick += length
+            start += Fraction(measure.get("len")) if measure.get("len") else measure_sig
+        yield from tones
+
+
+def merge_unison(mscx: str, keep: str | None) -> str:
+    """Singen mehrere Parts denselben Ton, erklingt er nur einmal: Kopien bekommen <play>0</play>.
+
+    Gleich heißt gleicher Einsatz und gleiche Tonhöhe; stumm wird eine Kopie nur, wenn der
+    behaltene Ton mindestens so lange klingt. Behalten wird der Part `keep`, sonst der oberste.
+    Innerhalb eines Parts bleibt alles, wie es ist. Der Text wird nur um die <play>-Tags ergänzt.
+    """
+    root = ET.fromstring(mscx)
+    staff_part = [p.get("id") or str(i) for i, p in enumerate(root.find("Score").findall("Part"), 1)
+                  for _ in p.findall("Staff")]
+    by_onset: dict[tuple, list] = {}
+    for staff_no, begin, end, pitch, notes in _sounding_notes(root):
+        part = staff_part[staff_no - 1] if staff_no <= len(staff_part) else str(staff_no)
+        by_onset.setdefault((begin, pitch), []).append((part, end, notes))
+    mute = set()
+    for tones in by_onset.values():
+        if len({part for part, _, _ in tones}) < 2:
+            continue
+        order = [p for p in staff_part if p == keep] + staff_part
+        kept = []
+        for part, end, notes in sorted(tones, key=lambda t: order.index(t[0]) if t[0] in order else len(order)):
+            if any(p != part and e >= end for p, e in kept):
+                mute.update(notes)
+            else:
+                kept.append((part, end))
+    # Notennummern gelten für den Text nur, wenn jede <Note> dort genau so steht.
+    if not mute or mscx.count("<Note>") != sum(1 for _ in root.iter("Note")):
+        return mscx
+    count = iter(range(mscx.count("<Note>")))
+    return re.sub(r"<Note>", lambda m: "<Note><play>0</play>" if next(count) in mute else m[0], mscx)
+
+
 def write_variant(src: Path, dst: Path, audio: dict, target: str | None, opts: Options, master_db: float = 0.0,
                   tempo: int = 100):
     a = json.loads(json.dumps(audio))
@@ -213,6 +308,8 @@ def write_variant(src: Path, dst: Path, audio: dict, target: str | None, opts: O
                 mscx = data.decode("utf-8")
                 if opts.flat_dynamic:
                     mscx = flatten_dynamics(mscx, opts.flat_dynamic)
+                if opts.merge_unison:
+                    mscx = merge_unison(mscx, target)
                 data = slow_tempo(mscx, tempo).encode("utf-8")
             zout.writestr(item, data)
 
@@ -344,6 +441,8 @@ def main():
             opts.tempos = tuple(int(t) for t in a.split("=", 1)[1].split(",") if t.strip())
             if not opts.tempos or not all(0 < t <= 100 for t in opts.tempos):
                 sys.exit("--tempo erwartet Prozentwerte bis 100, z. B. --tempo=100,80")
+        elif a == "--keep-unison":
+            opts.merge_unison = False
         elif a.startswith("--mscore="):
             opts.mscore = a.split("=", 1)[1]
         elif a.startswith("--sampler="):

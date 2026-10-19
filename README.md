@@ -6,6 +6,7 @@ MP3, in der diese Stimme vorne steht und die anderen leiser mitlaufen, dazu ein
 
 - Lautstärke der anderen Stimmen einstellbar (−40 bis −5 dB)
 - Dynamik wahlweise eingeebnet, damit leise Stellen hörbar bleiben
+- Unisono einfach: singen mehrere Stimmen denselben Ton, erklingt er nur einmal
 - Klang: Original, Muse Choir oder Grand Piano
 - Tempo: 100 % bis 50 % in 10-%-Schritten, auch mehrere Fassungen auf einmal
 - mit Original-Dynamik alle Tracks auf −1 dBFS normalisiert, nichts übersteuert
@@ -31,7 +32,7 @@ Kommandozeile:
 
 ```
 partfocus-cli <datei.mscz | ordner> [--sound=original|choir|piano] [--tempo=100,80] [--dry-run]
-              [--mscore=<MuseScore4.exe>] [--sampler=<MuseSampler-Ordner>]
+              [--keep-unison] [--mscore=<MuseScore4.exe>] [--sampler=<MuseSampler-Ordner>]
 ```
 
 Standardpfade: `C:\Program Files\MuseScore 4\bin\MuseScore4.exe` und
@@ -48,6 +49,13 @@ Original bleibt unverändert.
   Metronom bleibt unberührt.
 - **Dynamik:** Jedes `<Dynamic>` bekommt dieselbe Stufe und Velocity, Crescendo-
   und Decrescendo-Gabeln (`<Spanner type="HairPin">`) werden entfernt.
+- **Unisono:** Für jede Note wird Einsatz, Tonhöhe und Länge berechnet
+  (gebundene Noten zählen als ein Ton, Vorschläge nicht). Singt ein anderer Part
+  denselben Ton mit gleichem Einsatz und mindestens gleicher Länge, bekommt die
+  Kopie `<play>0</play>` und bleibt stumm. Behalten wird die Zielstimme, im
+  „Gesamt“-Track der oberste Part. So werden Stellen, an denen z. B. Sopran 1–3
+  zusammen singen, nicht lauter als geteilte Stellen. Mit `--keep-unison` bzw.
+  ohne Haken bei „Unisono einfach“ bleibt alles hörbar.
 - **Klang:** Ersetzt `track["in"]` durch einen Muse-Sounds-Eintrag. Muse Choir
   wählt die Stimme nach Instrument bzw. Stimmname: Sopran/Mezzo → Sopranos,
   Alt → Altos, Tenor → Tenors, Bariton/Bass → Basses. Andere Instrumente bleiben

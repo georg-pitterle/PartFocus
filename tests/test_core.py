@@ -190,6 +190,116 @@ def test_write_variant_slows_tempo(tmp_path):
     assert "<tempo>1.4</tempo>" in read_variant(dst)[1]
 
 
+# --- Unisono ---------------------------------------------------------------
+
+def _chord(pitch, dur="quarter", tie="", extra=""):
+    return (f"<Chord>{extra}<durationType>{dur}</durationType>"
+            f"<Note>{tie}<pitch>{pitch}</pitch><tpc>14</tpc></Note></Chord>")
+
+
+TIE_NEXT = '<Spanner type="Tie"><Tie/><next><location><fractions>1/2</fractions></location></next></Spanner>'
+TIE_PREV = '<Spanner type="Tie"><prev><location><fractions>-1/2</fractions></location></prev></Spanner>'
+
+
+def _unison_score(*staves):
+    """Ein Part pro System; jedes System ist eine Liste von Takten, jeder Takt ein voice-Inhalt."""
+    parts = "".join(f'<Part id="{i}"><Staff/><Instrument id="voice"/></Part>' for i in range(1, len(staves) + 1))
+    body = "".join(f'<Staff id="{i}">' + "".join(f"<Measure><voice>{m}</voice></Measure>" for m in measures)
+                   + "</Staff>" for i, measures in enumerate(staves, 1))
+    return f'<?xml version="1.0" encoding="UTF-8"?>\n<museScore version="4.70"><Score>' \
+           f'<TimeSig><sigN>4</sigN><sigD>4</sigD></TimeSig>{parts}{body}</Score></museScore>\n'
+
+
+def _muted(mscx):
+    """Pro System die Tonhöhen der stummen Noten."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(mscx)
+    return [[int(n.findtext("pitch")) for n in s.iter("Note") if n.findtext("play") == "0"]
+            for s in root.find("Score").findall("Staff")]
+
+
+def test_merge_unison_mutes_copies_in_lower_parts():
+    m = _chord(60) + _chord(62) + _chord(64) + _chord(65)
+    other = _chord(60) + _chord(67) + _chord(64) + _chord(69)
+    # Part 3 verdoppelt auch Part 2 (67, 69), dort klingt nichts mehr.
+    assert _muted(core.merge_unison(_unison_score([m], [other], [other]), None)) == [[], [60, 64], [60, 67, 64, 69]]
+
+
+def test_merge_unison_keeps_the_target_part():
+    m = _chord(60) + _chord(62) + _chord(64) + _chord(65)
+    assert _muted(core.merge_unison(_unison_score([m], [m]), "2")) == [[60, 62, 64, 65], []]
+
+
+def test_merge_unison_never_mutes_the_target():
+    # Der obere Part hält den Ton länger und deckt die Zielstimme ab, trotzdem bleibt sie hörbar.
+    top = _chord(60, "whole")
+    target = _chord(60) + _chord(62) + _chord(64, "half")
+    for staves in ([top], [target]), ([target], [top]):
+        pid = "2" if staves[1] == [target] else "1"
+        muted = _muted(core.merge_unison(_unison_score(*staves), pid))
+        assert muted[int(pid) - 1] == []
+
+
+def test_merge_unison_needs_same_onset_and_covering_length():
+    # Oben halbe Note, unten Viertel auf demselben Ton: unten ist abgedeckt.
+    # Unten halbe, oben Viertel: oben bleibt hörbar, unten auch, sonst bräche der Ton ab.
+    top = _chord(60, "half") + _chord(62) + _chord(64)
+    low = _chord(60) + _chord(60) + _chord(62, "half")
+    assert _muted(core.merge_unison(_unison_score([top], [low]), None)) == [[], [60]]
+
+
+def test_merge_unison_treats_tied_notes_as_one():
+    tied = _chord(60, "half", TIE_NEXT) + _chord(60, "half", TIE_PREV)
+    plain = _chord(60, "half") + _chord(60, "half")
+    one_long = core.merge_unison(_unison_score([tied], [tied]), None)
+    assert _muted(one_long) == [[], [60, 60]]
+    # Ein langer Ton deckt zwei kurze ab, zwei kurze aber nicht den langen.
+    assert _muted(core.merge_unison(_unison_score([tied], [plain]), None)) == [[], [60]]
+    assert _muted(core.merge_unison(_unison_score([plain], [tied]), None)) == [[], []]
+
+
+def test_merge_unison_counts_dots_tuplets_rests_and_measures():
+    top = [_chord(60, "half", extra="<dots>1</dots>") + _chord(62),
+           "<Tuplet><normalNotes>2</normalNotes><actualNotes>3</actualNotes></Tuplet>"
+           + _chord(64, "eighth") * 3 + "<endTuplet/>" + "<Rest><durationType>quarter</durationType></Rest>"
+           + _chord(65, "half")]
+    low = [_chord(59, "half", extra="<dots>1</dots>") + _chord(62),
+           _chord(64, "quarter") + "<location><fractions>1/4</fractions></location>" + _chord(65, "half")]
+    assert _muted(core.merge_unison(_unison_score(top, low), None)) == [[], [62, 65]]
+
+
+def test_merge_unison_ignores_grace_notes_and_silent_notes():
+    grace = _chord(60, "eighth", extra="<acciaccatura/>")
+    top = grace + _chord(62).replace("<Note>", "<Note><play>0</play>") + _chord(64, "half")
+    low = grace + _chord(62) + _chord(64, "half")
+    assert _muted(core.merge_unison(_unison_score([top], [low]), None)) == [[62], [64]]
+
+
+def test_merge_unison_leaves_one_part_alone():
+    m = _chord(60) + _chord(60)
+    two_voices = f'<Measure><voice>{m}</voice><voice>{m}</voice></Measure>'
+    mscx = _unison_score([m]).replace(f"<Measure><voice>{m}</voice></Measure>", two_voices)
+    assert core.merge_unison(mscx, None) == mscx
+
+
+def test_merge_unison_keeps_the_text_otherwise_unchanged():
+    m = _chord(60) + _chord(62)
+    mscx = _unison_score([m], [m])
+    out = core.merge_unison(mscx, None)
+    assert out.replace("<play>0</play>", "") == mscx
+
+
+def test_write_variant_merges_unison_when_asked(tmp_path):
+    m = _chord(60) + _chord(62)
+    audio = {"master": {"volumeDb": 0}, "tracks": []}
+    score = make_score(tmp_path / "U.mscz", _unison_score([m], [m]), audio)
+    dst = tmp_path / "v.mscz"
+    core.write_variant(score, dst, audio, "2", core.Options())
+    assert _muted(read_variant(dst)[1]) == [[60, 62], []]
+    core.write_variant(score, dst, audio, "2", core.Options(merge_unison=False))
+    assert "<play>" not in read_variant(dst)[1]
+
+
 # --- Klang -----------------------------------------------------------------
 
 @pytest.mark.parametrize("iid, name, expected", [
