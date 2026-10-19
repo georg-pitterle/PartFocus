@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/georg-pitterle/PartFocus/compare/v0.1.0...v0.2.0) (2026-09-27)
+
+
+### Features
+
+* check MuseScore 4 and Muse Sounds at startup, make paths configurable ([7cc1292](https://github.com/georg-pitterle/PartFocus/commit/7cc12921b4e5812fb85b84b37bf13adbe4b7d901))
+
 ## 0.1.0 (2026-09-26)
 
 
