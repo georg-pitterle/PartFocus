@@ -9,6 +9,7 @@ dependencies = [
     # Nur QtCore, QtGui und QtWidgets; die Addons würden das Bundle aufblähen.
     "PySide6-Essentials",
     "velopack",
+    "mido",
 ]
 
 [project.optional-dependencies]

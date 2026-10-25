@@ -300,6 +300,87 @@ def test_write_variant_merges_unison_when_asked(tmp_path):
     assert "<play>" not in read_variant(dst)[1]
 
 
+# --- Bitrate ---------------------------------------------------------------
+
+def test_render_passes_bitrate_to_musescore(tmp_path, monkeypatch):
+    calls = []
+
+    class Done:
+        returncode = 0
+
+        def __init__(self, cmd, **kwargs):
+            calls.append(cmd)
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(core.subprocess, "Popen", Done)
+    core.render([{"in": "a.mscz", "out": str(tmp_path / "a.mp3")}], tmp_path / "job.json", core.Options(bitrate=96))
+    assert calls[0][calls[0].index("-b") + 1] == "96"
+
+
+def test_default_bitrate_is_selectable():
+    assert core.Options().bitrate == 128 and core.Options().bitrate in core.BITRATES
+
+
+# --- Begleitung ------------------------------------------------------------
+
+def _backed_score(*staves, piano=1):
+    """Wie _unison_score, die letzten `piano` Systeme gehören zu einem Klavier-Part (id "9")."""
+    mscx = _unison_score(*staves)
+    singers = len(staves) - piano
+    parts = "".join(f'<Part id="{i}"><Staff/><Instrument id="voice"/></Part>' for i in range(1, len(staves) + 1))
+    real = "".join(f'<Part id="{i}"><Staff/><Instrument id="soprano"><instrumentId>voice.soprano</instrumentId>'
+                   f'</Instrument></Part>' for i in range(1, singers + 1))
+    real += ('<Part id="9">' + "<Staff/>" * piano
+             + '<Instrument id="piano"><instrumentId>keyboard.piano</instrumentId></Instrument></Part>')
+    return mscx.replace(parts, real)
+
+
+def test_accompaniment_needs_sung_parts_beside_it():
+    assert core.staff_parts(_backed_score([""], [""], [""], piano=2)) == ["1", "9", "9"]
+    import xml.etree.ElementTree as ET
+    assert core._accompaniment(core._score_parts(ET.fromstring(_backed_score([""], [""])))) == {"9"}
+    # Nur Instrumente: jedes bleibt eine eigene Stimme.
+    assert core._accompaniment(core._score_parts(ET.fromstring(_unison_score([""], [""])))) == set()
+
+
+def test_voices_leave_out_accompaniment(tmp_path):
+    audio = {"master": {"volumeDb": 0}, "tracks": [_track("1", "soprano"), _track("2", "soprano"),
+                                                   _track("9", "piano")]}
+    score = make_score(tmp_path / "K.mscz", _backed_score([""], [""], [""]), audio)
+    assert core.voices(score) == [("Gesamt", None), ("Part 1", "1"), ("Part 2", "2")]
+    assert core.voices(make_score(tmp_path / "K3.mscz", _backed_score([""], [""]), None)) == \
+        [("Gesamt", None), ("Part 1", "1")]
+
+
+def test_merge_unison_leaves_accompaniment_alone():
+    m = _chord(60) + _chord(62)
+    # Das Klavier verdoppelt den Chor, stumm wird aber nur der untere Sänger.
+    assert _muted(core.merge_unison(_backed_score([m], [m], [m]), None)) == [[], [60, 62], []]
+    assert _muted(core.merge_unison(_backed_score([m], [m], [m]), "9")) == [[], [60, 62], []]
+
+
+def test_mute_accompaniment_silences_every_piano_staff():
+    m = _chord(60) + _chord(62)
+    mscx = _backed_score([m], [m], [m], piano=2)
+    assert _muted(core.mute_accompaniment(mscx)) == [[], [60, 62], [60, 62]]
+    assert core.mute_accompaniment(_unison_score([m], [m])) == _unison_score([m], [m])
+
+
+def test_write_variant_plays_accompaniment_quietly_or_not_at_all(tmp_path):
+    m = _chord(60)
+    audio = {"master": {"volumeDb": 0}, "tracks": [_track("1", "soprano"), _track("9", "piano")]}
+    score = make_score(tmp_path / "K.mscz", _backed_score([m], [m]), audio)
+    dst = tmp_path / "v.mscz"
+    core.write_variant(score, dst, audio, "1", core.Options(others_db=-20))
+    a, mscx = read_variant(dst)
+    assert {t["partId"]: t["out"]["volumeDb"] for t in a["tracks"]} == {"1": 0.0, "9": -20}
+    assert "<play>" not in mscx
+    core.write_variant(score, dst, audio, "1", core.Options(accompaniment=False))
+    assert _muted(read_variant(dst)[1]) == [[], [60]]
+
+
 # --- Klang -----------------------------------------------------------------
 
 @pytest.mark.parametrize("iid, name, expected", [
@@ -407,6 +488,116 @@ def test_export_measures_only_fastest_tempo_and_reuses_gain(ms4, monkeypatch):
     results = core.export([ms4], core.Options(flat_dynamic=None, tempos=(80, 60)))
     assert calls == [[".wav"] * 4, [".mp3"] * 8]
     assert len({r.gain for r in results}) == 1 and results[0].gain != 0.0
+    assert all(r.ok for r in results)
+
+
+# --- MIDI ------------------------------------------------------------------
+
+def write_midi(path: Path, tracks: int, velocity: int = 80) -> Path:
+    """So wie MuseScore exportiert: eine Spur pro System, Note-Ende als note_on mit Velocity 0."""
+    import mido
+    mid = mido.MidiFile(ticks_per_beat=480)
+    for ch in range(tracks):
+        mid.tracks.append(mido.MidiTrack([
+            mido.Message("control_change", channel=ch, control=7, value=100),
+            mido.Message("note_on", channel=ch, note=60, velocity=velocity),
+            mido.Message("note_on", channel=ch, note=60, velocity=0, time=480),
+            mido.MetaMessage("end_of_track")]))
+    mid.save(path)
+    return path
+
+
+def midi_velocities(path: Path) -> list[list[int]]:
+    import mido
+    return [[m.velocity for m in t if m.type == "note_on"] for t in mido.MidiFile(path).tracks]
+
+
+def test_staff_parts_lists_part_per_staff():
+    mscx = ('<museScore><Score><Part id="1"><Staff id="1"/><Staff id="2"/></Part>'
+            '<Part id="7"><Staff id="3"/></Part></Score></museScore>')
+    assert core.staff_parts(mscx) == ["1", "1", "7"]
+
+
+def test_scale_midi_lowers_other_parts_only(tmp_path):
+    mid = write_midi(tmp_path / "x.mid", 3)
+    core.scale_midi(mid, ["1", "2", "2"], "1", -20.0)
+    assert midi_velocities(mid) == [[80, 0], [8, 0], [8, 0]]
+
+
+def test_scale_midi_keeps_quiet_notes_audible(tmp_path):
+    mid = write_midi(tmp_path / "x.mid", 2, velocity=16)
+    core.scale_midi(mid, ["1", "2"], "1", -40.0)
+    assert midi_velocities(mid) == [[16, 0], [1, 0]]
+
+
+def test_scale_midi_leaves_gesamt_untouched(tmp_path):
+    mid = write_midi(tmp_path / "x.mid", 2)
+    before = mid.read_bytes()
+    core.scale_midi(mid, ["1", "2"], None, -20.0)
+    assert mid.read_bytes() == before
+
+
+def test_scale_midi_refuses_unexpected_track_count(tmp_path):
+    mid = write_midi(tmp_path / "x.mid", 3)
+    with pytest.raises(RuntimeError, match="3 Spuren"):
+        core.scale_midi(mid, ["1", "2"], "1", -20.0)
+
+
+@pytest.fixture
+def choir(tmp_path):
+    """Zwei Parts mit je einem System, wie MS4 sie schreibt."""
+    mscx = _unison_score(["<Rest><durationType>measure</durationType></Rest>"] * 1,
+                         ["<Rest><durationType>measure</durationType></Rest>"] * 1)
+    audio = {"master": {"volumeDb": 0}, "tracks": [_track("1", "soprano"), _track("2", "alto")]}
+    return make_score(tmp_path / "Chor.mscz", mscx, audio)
+
+
+def test_plan_midi_names_outputs_without_sound(ms4, tmp_path):
+    jobs = core.plan(ms4, tmp_path, core.Options(sound="choir", format="midi", tempos=(100, 80)))
+    names = [Path(j["out"]).name for j in jobs]
+    assert names[:2] == ["Lied - Gesamt.mid", "Lied - Sopran 1.mid"]
+    assert "Lied - Alt (80%).mid" in names and len(names) == 8
+
+
+def test_plan_both_formats_share_one_variant(ms4, tmp_path):
+    jobs = core.plan(ms4, tmp_path, core.Options(sound="piano", format="both"))
+    names = [Path(j["out"]).name for j in jobs]
+    assert names[:2] == ["Lied - Gesamt (Grand Piano).mp3", "Lied - Gesamt.mid"]
+    assert len(names) == 8 and len({j["in"] for j in jobs}) == 4
+
+
+def fake_midi_render(calls, tracks):
+    def render(jobs, jobfile, opts, tick=lambda n: None, cancelled=lambda: False):
+        calls.append([Path(j["out"]).suffix for j in jobs])
+        for j in jobs:
+            out = Path(j["out"])
+            if out.suffix == ".mid":
+                write_midi(out, tracks)
+            elif out.suffix == ".wav":
+                write_float_wav(out, [0.25, -0.5])
+            else:
+                out.write_bytes(b"mp3")
+    return render
+
+
+def test_export_midi_skips_measuring_and_lowers_other_parts(choir, monkeypatch):
+    calls = []
+    monkeypatch.setattr(core, "render", fake_midi_render(calls, 2))
+    results = core.export([choir], core.Options(format="midi", flat_dynamic=None, others_db=-20))
+    assert calls == [[".mid"] * 3]
+    assert [r.out.name for r in results] == ["Chor - Gesamt.mid", "Chor - Part 1.mid", "Chor - Part 2.mid"]
+    assert [midi_velocities(r.out) for r in results] == [[[80, 0], [80, 0]], [[80, 0], [8, 0]],
+                                                         [[8, 0], [80, 0]]]
+    assert all(r.ok and r.peak_db is None for r in results)
+
+
+def test_export_both_measures_mp3_only(choir, monkeypatch):
+    calls = []
+    monkeypatch.setattr(core, "render", fake_midi_render(calls, 2))
+    results = core.export([choir], core.Options(format="both", flat_dynamic=None))
+    # MuseScore stürzt ab, wenn ein Aufruf Audio und MIDI mischt: MIDI kommt getrennt.
+    assert calls == [[".wav"] * 3, [".mp3"] * 3, [".mid"] * 3]
+    assert [r.peak_db is None for r in results] == [False, True] * 3
     assert all(r.ok for r in results)
 
 

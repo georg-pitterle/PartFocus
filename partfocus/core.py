@@ -9,9 +9,13 @@ Mit eingeebneter Dynamik ist der Pegel fest: nur MP3, Master 0 dB.
 Tempo wählbar, auch mehrere Fassungen auf einmal (Options.tempos, Prozent vom Original); gemessen wird
 nur die schnellste, die anderen übernehmen ihren Pegel.
 Unisono: singen mehrere Parts denselben Ton, erklingt er nur einmal (Options.merge_unison).
+MIDI statt oder neben MP3 (Options.format): andere Stimmen leiser über die Velocity, ohne Klang und Pegel.
+Begleitung (Instrumente neben Gesangsstimmen, z. B. Klavier): kein eigener Track, läuft in jedem Track
+so laut wie die anderen Stimmen mit oder bleibt stumm (Options.accompaniment).
 Aufruf:  partfocus-cli [datei.mscz | ordner] [--sound=original|choir|piano] [--tempo=100,80] [--dry-run]
-         [--keep-unison] [--mscore=MuseScore4.exe] [--sampler=MuseSampler-Ordner]
-Ausgabe: <ordner>/<stück>/<stück> - <Stimme>[ (<Klang>)][ (<Tempo>%)].mp3
+         [--format=mp3|midi|both] [--bitrate=128] [--keep-unison] [--no-accompaniment] [--mscore=MuseScore4.exe]
+         [--sampler=MuseSampler-Ordner]
+Ausgabe: <ordner>/<stück>/<stück> - <Stimme>[ (<Klang>)][ (<Tempo>%)].mp3, MIDI ohne Klang als .mid
 GUI:     partfocus
 """
 import array, json, math, os, re, struct, subprocess, sys, tempfile, time, zipfile
@@ -27,6 +31,7 @@ PEAK_DBFS = -1.0
 MAX_GAIN_DB = 24.0
 DEFAULT_TEMPO = 2.0  # Viertel pro Sekunde = 120 BPM, wenn die Partitur keine Tempoangabe hat
 TEMPOS = (100, 90, 80, 70, 60, 50)  # wählbare Tempi in Prozent vom Original
+BITRATES = (192, 128, 96, 64)  # wählbare MP3-Bitraten in kbps; die Dateigröße wächst proportional
 VELOCITY = {"ppp": 16, "pp": 33, "p": 49, "mp": 64, "mf": 80, "f": 96, "ff": 112, "fff": 126}
 
 
@@ -46,6 +51,7 @@ CHOIR = [(("sopran", "mezzo", "treble", "diskant"), _muse("19", "Sopranos", "Mus
          (("tenor",), _muse("21", "Tenors", "Muse Choir", "voices.choir.tenor")),
          (("bari", "bass"), _muse("22", "Basses", "Muse Choir", "voices.choir.bass"))]
 SOUNDS = {"original": "Original", "choir": "Muse Choir", "piano": "Grand Piano"}
+FORMATS = {"mp3": "MP3", "midi": "MIDI", "both": "MP3 + MIDI"}
 
 
 def choir_voice(instrument_id: str, name: str) -> dict | None:
@@ -107,7 +113,9 @@ class Options:
     sound: str = "original"  # Schlüssel aus SOUNDS
     tempos: tuple[int, ...] = (100,)  # eine Fassung pro Tempo, Prozent vom Original
     merge_unison: bool = True  # gleicher Ton in mehreren Parts erklingt nur einmal
-    bitrate: int = 192
+    format: str = "mp3"  # Schlüssel aus FORMATS
+    accompaniment: bool = True  # Begleitung leise mitspielen statt stumm
+    bitrate: int = 128  # kbps, aus BITRATES
     mscore: str = MSCORE
 
 
@@ -126,11 +134,29 @@ class Cancelled(Exception):
     pass
 
 
-def _parts(z: zipfile.ZipFile):
+def _score_parts(root: ET.Element):
     """(partId, Instrument-Element, Part-Element). MS3-Dateien haben keine IDs; MS4 nummeriert beim Umwandeln 1..N."""
+    return [(p.get("id") or str(i), p.find("Instrument"), p)
+            for i, p in enumerate(root.find("Score").findall("Part"), 1)]
+
+
+def _parts(z: zipfile.ZipFile):
     mscx = next(n for n in z.namelist() if n.endswith(".mscx") and "/" not in n)
-    root = ET.fromstring(z.read(mscx))
-    return [(p.get("id") or str(i), p.find("Instrument"), p) for i, p in enumerate(root.iter("Part"), 1)]
+    return _score_parts(ET.fromstring(z.read(mscx)))
+
+
+def _accompaniment(parts) -> set[str]:
+    """partIds der Begleitung: Parts ohne Gesangsstimme (instrumentId "voice.*") neben solchen mit.
+
+    Ohne jede Gesangsstimme ist nichts Begleitung, dann bekommt jedes Instrument seinen Track.
+    """
+    sung = {pid for pid, inst, _ in parts
+            if inst is not None and (inst.findtext("instrumentId") or "").startswith("voice.")}
+    return {pid for pid, _, _ in parts} - sung if sung else set()
+
+
+def accompaniment(z: zipfile.ZipFile) -> set[str]:
+    return _accompaniment(_parts(z))
 
 
 def part_names(z: zipfile.ZipFile) -> dict[str, str]:
@@ -258,20 +284,73 @@ def _sounding_notes(root: ET.Element):
         yield from tones
 
 
+def _staff_parts(root: ET.Element) -> list[str]:
+    return [pid for pid, _, p in _score_parts(root) for _ in p.findall("Staff")]
+
+
+def staff_parts(mscx: str) -> list[str]:
+    """partId pro System, in Partitur-Reihenfolge."""
+    return _staff_parts(ET.fromstring(mscx))
+
+
+def scale_midi(path: Path, parts: list[str], target: str | None, others_db: float):
+    """Andere Stimmen leiser über die Velocity jeder Note; Kanallautstärke (CC7) ignorieren manche Player.
+
+    MuseScore schreibt eine Spur pro System, `parts` ordnet sie den Parts zu. Note-Enden
+    (Velocity 0) bleiben, jede Note bleibt mit mindestens Velocity 1 hörbar.
+    """
+    if target is None:
+        return
+    import mido
+    mid = mido.MidiFile(path)
+    if len(mid.tracks) != len(parts):
+        raise RuntimeError(f"{path.name}: {len(mid.tracks)} Spuren, aber {len(parts)} Notensysteme")
+    factor = 10 ** (others_db / 20)
+    for track, part in zip(mid.tracks, parts):
+        if part == target:
+            continue
+        for i, msg in enumerate(track):
+            if msg.type == "note_on" and msg.velocity:
+                track[i] = msg.copy(velocity=max(1, round(msg.velocity * factor)))
+    mid.save(path)
+
+
+def _mute_notes(mscx: str, root: ET.Element, mute: set[int]) -> str:
+    """<play>0</play> in die Noten mit diesen Nummern; der Text bleibt sonst unverändert."""
+    # Notennummern gelten für den Text nur, wenn jede <Note> dort genau so steht.
+    if not mute or mscx.count("<Note>") != sum(1 for _ in root.iter("Note")):
+        return mscx
+    count = iter(range(mscx.count("<Note>")))
+    return re.sub(r"<Note>", lambda m: "<Note><play>0</play>" if next(count) in mute else m[0], mscx)
+
+
+def mute_accompaniment(mscx: str) -> str:
+    """Alle Noten der Begleitung stumm."""
+    root = ET.fromstring(mscx)
+    staff_part, parts = _staff_parts(root), _accompaniment(_score_parts(root))
+    number = {id(n): i for i, n in enumerate(root.iter("Note"))}
+    staves = root.find("Score").findall("Staff")
+    mute = {number[id(n)] for no, staff in enumerate(staves) if no < len(staff_part) and staff_part[no] in parts
+            for n in staff.iter("Note")}
+    return _mute_notes(mscx, root, mute)
+
+
 def merge_unison(mscx: str, keep: str | None) -> str:
     """Singen mehrere Parts denselben Ton, erklingt er nur einmal: Kopien bekommen <play>0</play>.
 
     Gleich heißt gleicher Einsatz und gleiche Tonhöhe; stumm wird eine Kopie nur, wenn der
     behaltene Ton mindestens so lange klingt. Behalten wird der Part `keep`, sonst der oberste.
-    Innerhalb eines Parts bleibt alles, wie es ist. Der Text wird nur um die <play>-Tags ergänzt.
+    Innerhalb eines Parts bleibt alles, wie es ist, die Begleitung bleibt ganz außen vor.
+    Der Text wird nur um die <play>-Tags ergänzt.
     """
     root = ET.fromstring(mscx)
-    staff_part = [p.get("id") or str(i) for i, p in enumerate(root.find("Score").findall("Part"), 1)
-                  for _ in p.findall("Staff")]
+    staff_part = _staff_parts(root)
+    backing = _accompaniment(_score_parts(root))
     by_onset: dict[tuple, list] = {}
     for staff_no, begin, end, pitch, notes in _sounding_notes(root):
         part = staff_part[staff_no - 1] if staff_no <= len(staff_part) else str(staff_no)
-        by_onset.setdefault((begin, pitch), []).append((part, end, notes))
+        if part not in backing:
+            by_onset.setdefault((begin, pitch), []).append((part, end, notes))
     mute = set()
     for tones in by_onset.values():
         if len({part for part, _, _ in tones}) < 2:
@@ -283,11 +362,7 @@ def merge_unison(mscx: str, keep: str | None) -> str:
                 mute.update(notes)
             else:
                 kept.append((part, end))
-    # Notennummern gelten für den Text nur, wenn jede <Note> dort genau so steht.
-    if not mute or mscx.count("<Note>") != sum(1 for _ in root.iter("Note")):
-        return mscx
-    count = iter(range(mscx.count("<Note>")))
-    return re.sub(r"<Note>", lambda m: "<Note><play>0</play>" if next(count) in mute else m[0], mscx)
+    return _mute_notes(mscx, root, mute)
 
 
 def write_variant(src: Path, dst: Path, audio: dict, target: str | None, opts: Options, master_db: float = 0.0,
@@ -310,6 +385,8 @@ def write_variant(src: Path, dst: Path, audio: dict, target: str | None, opts: O
                     mscx = flatten_dynamics(mscx, opts.flat_dynamic)
                 if opts.merge_unison:
                     mscx = merge_unison(mscx, target)
+                if not opts.accompaniment:
+                    mscx = mute_accompaniment(mscx)
                 data = slow_tempo(mscx, tempo).encode("utf-8")
             zout.writestr(item, data)
 
@@ -352,13 +429,15 @@ def safe(s: str) -> str:
 
 
 def voices(score: Path) -> list[tuple[str, str | None]]:
-    """(Name, partId) pro Variante, beginnend mit ("Gesamt", None)."""
+    """(Name, partId) pro Variante, beginnend mit ("Gesamt", None). Die Begleitung bekommt keinen Track."""
     with zipfile.ZipFile(score) as z:
         audio = load_audio(z)
         names = part_names(z)
+        backing = accompaniment(z)
+    names = {pid: n for pid, n in names.items() if pid not in backing}
     if audio is None:  # MS3: nach dem Umwandeln gibt es genau einen Track pro Part
         return [("Gesamt", None)] + [(n, pid) for pid, n in names.items()]
-    track_ids = {t["partId"] for t in audio["tracks"] if t.get("instrumentId") != "metronome"}
+    track_ids = {t["partId"] for t in audio["tracks"] if t.get("instrumentId") != "metronome"} - backing
     part_ids = [pid for pid in names if pid in track_ids] + sorted(track_ids - names.keys())
     return [("Gesamt", None)] + [(names.get(pid, pid), pid) for pid in part_ids]
 
@@ -378,11 +457,14 @@ def plan(score: Path, tmp: Path, opts: Options) -> list[dict]:
     for tempo in sorted(set(opts.tempos), reverse=True):
         for label, pid in voices(source):
             v = tmp / f"{safe(score.stem)}__{safe(label)}__{tempo}.mscz"
-            suffix = "" if opts.sound == "original" else f" ({SOUNDS[opts.sound]})"
-            suffix += "" if tempo == 100 else f" ({tempo}%)"
-            jobs.append({"in": str(v), "out": str(out_dir / f"{safe(score.stem)} - {safe(label)}{suffix}.mp3"),
-                         "wav": str(v.with_suffix(".wav")), "score": source, "audio": audio, "pid": pid,
-                         "tempo": tempo, "key": (str(score), pid)})
+            speed = "" if tempo == 100 else f" ({tempo}%)"
+            # MIDI hat keinen Klang, der spielt in der App; darum dort kein Klang im Namen.
+            outs = {"mp3": ("" if opts.sound == "original" else f" ({SOUNDS[opts.sound]})") + speed + ".mp3",
+                    "midi": speed + ".mid"}
+            for fmt in ("mp3", "midi") if opts.format == "both" else (opts.format,):
+                jobs.append({"in": str(v), "out": str(out_dir / f"{safe(score.stem)} - {safe(label)}{outs[fmt]}"),
+                             "wav": str(v.with_suffix(".wav")), "score": source, "audio": audio, "pid": pid,
+                             "tempo": tempo, "key": (str(score), pid), "midi": fmt == "midi"})
     return jobs
 
 
@@ -399,7 +481,9 @@ def export(scores: list[Path], opts: Options,
             jobs += plan(s, Path(td), opts)
         # Eingeebnete Dynamik heißt fester Pegel: kein Messdurchlauf, Master bleibt bei 0 dB.
         # Gemessen wird nur die schnellste Fassung, die langsameren übernehmen ihren Pegel.
-        probes = [j for j in jobs if j["tempo"] == max(opts.tempos)] if opts.flat_dynamic is None else []
+        # MIDI hat keinen Pegel; bei "beides" teilen sich MP3 und MIDI dieselbe Variante.
+        mp3s = [j for j in jobs if not j["midi"]]
+        probes = [j for j in mp3s if j["tempo"] == max(opts.tempos)] if opts.flat_dynamic is None else []
         measured = len(probes)
         total = measured + len(jobs)
         for j in jobs:
@@ -416,12 +500,23 @@ def export(scores: list[Path], opts: Options,
                 peak = wav_peak(Path(j["wav"]))
                 peak_db = 20 * math.log10(peak) if peak > 0 else -math.inf
                 levels[j["key"]] = peak_db, min(MAX_GAIN_DB, PEAK_DBFS - peak_db)
-            for j in jobs:
+            for j in mp3s:
                 j["peak_db"], j["gain"] = levels[j["key"]]
                 write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts, j["gain"], j["tempo"])
-        progress("MP3s rendern", measured, total)
-        render([{"in": j["in"], "out": j["out"]} for j in jobs], jobfile, opts,
-               lambda n: progress("MP3s rendern", measured + n, total), cancelled)
+        # Getrennte Aufrufe: mischt einer Audio und MIDI, stürzt MuseScore ab.
+        mids = [j for j in jobs if j["midi"]]
+        done = measured
+        for text, batch in (("MP3s rendern", mp3s), ("MIDI exportieren", mids)):
+            if batch:
+                progress(text, done, total)
+                render([{"in": j["in"], "out": j["out"]} for j in batch], jobfile, opts,
+                       lambda n, text=text, done=done: progress(text, done + n, total), cancelled)
+                done += len(batch)
+        for j in mids:
+            with zipfile.ZipFile(j["in"]) as z:
+                mscx = next(n for n in z.namelist() if n.endswith(".mscx") and "/" not in n)
+                parts = staff_parts(z.read(mscx).decode("utf-8"))
+            scale_midi(Path(j["out"]), parts, j["pid"], opts.others_db)
     return [Result(Path(j["out"]), j["peak_db"], j["gain"]) for j in jobs]
 
 
@@ -441,8 +536,18 @@ def main():
             opts.tempos = tuple(int(t) for t in a.split("=", 1)[1].split(",") if t.strip())
             if not opts.tempos or not all(0 < t <= 100 for t in opts.tempos):
                 sys.exit("--tempo erwartet Prozentwerte bis 100, z. B. --tempo=100,80")
+        elif a.startswith("--format="):
+            opts.format = a.split("=", 1)[1]
+            if opts.format not in FORMATS:
+                sys.exit(f"--format muss einer von {', '.join(FORMATS)} sein")
+        elif a.startswith("--bitrate="):
+            opts.bitrate = int(a.split("=", 1)[1]) if a.split("=", 1)[1].isdigit() else 0
+            if opts.bitrate not in BITRATES:
+                sys.exit(f"--bitrate muss einer von {', '.join(map(str, BITRATES))} sein")
         elif a == "--keep-unison":
             opts.merge_unison = False
+        elif a == "--no-accompaniment":
+            opts.accompaniment = False
         elif a.startswith("--mscore="):
             opts.mscore = a.split("=", 1)[1]
         elif a.startswith("--sampler="):

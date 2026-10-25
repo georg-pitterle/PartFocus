@@ -169,6 +169,11 @@ class Window(QWidget):
                                "damit Unisono-Stellen nicht lauter werden")
         op.addSpacing(16)
         op.addWidget(self.unison)
+        self.accompaniment = QCheckBox("Begleitung")
+        self.accompaniment.setChecked(self.settings.value("accompaniment", "true") in (True, "true"))
+        self.accompaniment.setToolTip("Begleitung wie Klavier in jedem Track so laut wie die anderen Stimmen\n"
+                                      "mitspielen, ohne Haken bleibt sie stumm; einen eigenen Track bekommt sie nicht")
+        op.addWidget(self.accompaniment)
         tp = QHBoxLayout()
         tp.setSpacing(6)
         tempo_label = QLabel("Tempo")
@@ -186,6 +191,25 @@ class Window(QWidget):
         if not self.tempos():
             self.tempo_btns[100].setChecked(True)
         tp.addStretch()
+        self.format = QComboBox()
+        for key, label in core.FORMATS.items():
+            self.format.addItem(label, key)
+        self.format.setCurrentIndex(max(0, self.format.findData(self.settings.value("format", "mp3"))))
+        self.format.setToolTip("MIDI braucht kaum Speicher; die anderen Stimmen werden über die\n"
+                               "Anschlagstärke leiser, den Klang wählt das Abspielprogramm")
+        self.format.currentIndexChanged.connect(lambda: (self.status.setText(""), self.update_buttons()))
+        tp.addWidget(QLabel("Format"))
+        tp.addWidget(self.format)
+        self.bitrate = QComboBox()
+        for kbps in core.BITRATES:
+            self.bitrate.addItem(f"{kbps} kbps", kbps)
+        self.bitrate.setCurrentIndex(max(0, self.bitrate.findData(int(self.settings.value("bitrate", 128)))))
+        self.bitrate.setToolTip("Bitrate der MP3s, pro Minute etwa:\n"
+                                "192 kbps 1,4 MB · 128 kbps 1 MB · 96 kbps 0,7 MB · 64 kbps 0,5 MB\n"
+                                "64 kbps klingt etwas dumpfer, zum Üben reicht es")
+        tp.addSpacing(8)
+        tp.addWidget(QLabel("Qualität"))
+        tp.addWidget(self.bitrate)
         rows.addLayout(op)
         rows.addLayout(tp)
 
@@ -359,12 +383,17 @@ class Window(QWidget):
         self.remove_btn.setEnabled(not busy and bool(self.list.selectedItems()))
         self.start_btn.setEnabled(busy or self.list.count() > 0)
         self.start_btn.setText("Abbrechen" if busy else "Tracks erstellen")
-        for w in (self.others, self.dynamic, self.sound, self.unison, self.list, self.paths_btn, *self.tempo_btns.values()):
+        for w in (self.others, self.dynamic, self.sound, self.unison, self.accompaniment, self.format, self.list,
+                  self.paths_btn, *self.tempo_btns.values()):
             w.setEnabled(not busy)
+        # MIDI hat keinen Klang, den spielt die Übe-App.
+        self.sound.setEnabled(not busy and self.format.currentData() != "midi")
+        self.bitrate.setEnabled(not busy and self.format.currentData() != "midi")
         # Kein Neustart mitten im Rendern: MuseScore liefe verwaist weiter.
         self.update_btn.setEnabled(not busy)
         if not busy and not self.status.text() and self.list.count():
             n = sum(self.list.item(i).data(Qt.UserRole + 1) for i in range(self.list.count())) * len(self.tempos())
+            n *= 2 if self.format.currentData() == "both" else 1
             self.status.setText(f"{self.list.count()} Partitur(en), {n} Tracks")
 
     def save_settings(self):
@@ -372,6 +401,9 @@ class Window(QWidget):
         self.settings.setValue("dynamic", self.dynamic.currentData() or "")
         self.settings.setValue("sound", self.sound.currentData())
         self.settings.setValue("merge_unison", self.unison.isChecked())
+        self.settings.setValue("accompaniment", self.accompaniment.isChecked())
+        self.settings.setValue("format", self.format.currentData())
+        self.settings.setValue("bitrate", self.bitrate.currentData())
         self.settings.setValue("tempos", ",".join(map(str, self.tempos())))
         self.settings.setValue("scores", [str(s) for s in self.scores()])
 
@@ -390,7 +422,8 @@ class Window(QWidget):
         self.save_settings()
         opts = core.Options(others_db=float(self.others.value()), flat_dynamic=self.dynamic.currentData(),
                                  sound=self.sound.currentData(), tempos=self.tempos(), mscore=self.mscore(),
-                                 merge_unison=self.unison.isChecked())
+                                 merge_unison=self.unison.isChecked(), format=self.format.currentData(),
+                                 accompaniment=self.accompaniment.isChecked(), bitrate=self.bitrate.currentData())
         scores = [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
                   if self.list.item(i).data(Qt.UserRole + 1)]
         if not scores:
