@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.0](https://github.com/georg-pitterle/PartFocus/compare/v0.4.0...v0.5.0) (2026-11-01)
+
+
+### Features
+
+* open the right folder and report the result ([fde57a0](https://github.com/georg-pitterle/PartFocus/commit/fde57a094409f6051db39bf4f671af05f4f7f03a))
+* optional short file names ([fde57a0](https://github.com/georg-pitterle/PartFocus/commit/fde57a094409f6051db39bf4f671af05f4f7f03a))
+* redesign the window around voice booklets ([fde57a0](https://github.com/georg-pitterle/PartFocus/commit/fde57a094409f6051db39bf4f671af05f4f7f03a))
+* replace existing tracks only after a run has finished ([fde57a0](https://github.com/georg-pitterle/PartFocus/commit/fde57a094409f6051db39bf4f671af05f4f7f03a))
+
 ## [0.4.0](https://github.com/georg-pitterle/PartFocus/compare/v0.3.0...v0.4.0) (2026-10-25)
 
 
