@@ -13,12 +13,13 @@ MIDI statt oder neben MP3 (Options.format): andere Stimmen leiser über die Velo
 Begleitung (Instrumente neben Gesangsstimmen, z. B. Klavier): kein eigener Track, läuft in jedem Track
 so laut wie die anderen Stimmen mit oder bleibt stumm (Options.accompaniment).
 Aufruf:  partfocus-cli [datei.mscz | ordner] [--sound=original|choir|piano] [--tempo=100,80] [--dry-run]
-         [--format=mp3|midi|both] [--bitrate=128] [--keep-unison] [--no-accompaniment] [--mscore=MuseScore4.exe]
-         [--sampler=MuseSampler-Ordner]
+         [--format=mp3|midi|both] [--bitrate=128] [--keep-unison] [--no-accompaniment] [--short-names]
+         [--mscore=MuseScore4.exe] [--sampler=MuseSampler-Ordner]
 Ausgabe: <ordner>/<stück>/<stück> - <Stimme>[ (<Klang>)][ (<Tempo>%)].mp3, MIDI ohne Klang als .mid
+         Kurze Namen ohne Klang und ohne Leerzeichen vor Ziffern: <stück> - Bass1[ (<Tempo>%)].mp3
 GUI:     partfocus
 """
-import array, json, math, os, re, struct, subprocess, sys, tempfile, time, zipfile
+import array, json, math, os, re, shutil, struct, subprocess, sys, tempfile, time, zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from fractions import Fraction
@@ -116,6 +117,7 @@ class Options:
     format: str = "mp3"  # Schlüssel aus FORMATS
     accompaniment: bool = True  # Begleitung leise mitspielen statt stumm
     bitrate: int = 128  # kbps, aus BITRATES
+    short_names: bool = False  # "Lied - Bass1.mp3" statt "Lied - Bass 1 (Muse Choir).mp3"
     mscore: str = MSCORE
 
 
@@ -124,10 +126,11 @@ class Result:
     out: Path
     peak_db: float | None  # None = nicht gemessen
     gain: float
+    rendered: bool = True  # False = MuseScore hat nichts geliefert, out ist höchstens noch die alte Datei
 
     @property
     def ok(self) -> bool:
-        return self.out.exists() and (self.peak_db is None or self.peak_db > -60)
+        return self.rendered and self.out.exists() and (self.peak_db is None or self.peak_db > -60)
 
 
 class Cancelled(Exception):
@@ -442,8 +445,25 @@ def voices(score: Path) -> list[tuple[str, str | None]]:
     return [("Gesamt", None)] + [(names.get(pid, pid), pid) for pid in part_ids]
 
 
+def outputs(score: Path, label: str, tempo: int, opts: Options) -> dict[str, Path]:
+    """Zielpfad pro Format für eine Stimme in einem Tempo."""
+    speed = "" if tempo == 100 else f" ({tempo}%)"
+    # Kurze Namen behalten das Tempo, sonst überschrieben sich die Fassungen.
+    name = re.sub(r" +(?=\d)", "", safe(label)) if opts.short_names else safe(label)
+    sound = "" if opts.short_names or opts.sound == "original" else f" ({SOUNDS[opts.sound]})"
+    # MIDI hat keinen Klang, der spielt in der App; darum dort kein Klang im Namen.
+    ends = {"mp3": sound + speed + ".mp3", "midi": speed + ".mid"}
+    return {fmt: score.parent / safe(score.stem) / f"{safe(score.stem)} - {name}{ends[fmt]}"
+            for fmt in (("mp3", "midi") if opts.format == "both" else (opts.format,))}
+
+
+def existing_outputs(scores: list[Path], opts: Options) -> list[Path]:
+    """Vorhandene Tracks, die ein Lauf mit diesen Einstellungen ersetzen würde."""
+    return [p for s in scores for tempo in sorted(set(opts.tempos), reverse=True) for label, _ in voices(s)
+            for p in outputs(s, label, tempo, opts).values() if p.exists()]
+
+
 def plan(score: Path, tmp: Path, opts: Options) -> list[dict]:
-    out_dir = score.parent / safe(score.stem)
     source = score
     with zipfile.ZipFile(score) as z:
         audio = load_audio(z)
@@ -457,21 +477,54 @@ def plan(score: Path, tmp: Path, opts: Options) -> list[dict]:
     for tempo in sorted(set(opts.tempos), reverse=True):
         for label, pid in voices(source):
             v = tmp / f"{safe(score.stem)}__{safe(label)}__{tempo}.mscz"
-            speed = "" if tempo == 100 else f" ({tempo}%)"
-            # MIDI hat keinen Klang, der spielt in der App; darum dort kein Klang im Namen.
-            outs = {"mp3": ("" if opts.sound == "original" else f" ({SOUNDS[opts.sound]})") + speed + ".mp3",
-                    "midi": speed + ".mid"}
-            for fmt in ("mp3", "midi") if opts.format == "both" else (opts.format,):
-                jobs.append({"in": str(v), "out": str(out_dir / f"{safe(score.stem)} - {safe(label)}{outs[fmt]}"),
-                             "wav": str(v.with_suffix(".wav")), "score": source, "audio": audio, "pid": pid,
-                             "tempo": tempo, "key": (str(score), pid), "midi": fmt == "midi"})
+            for fmt, out in outputs(score, label, tempo, opts).items():
+                jobs.append({"in": str(v), "out": str(out), "wav": str(v.with_suffix(".wav")), "score": source,
+                             "audio": audio, "pid": pid, "tempo": tempo, "key": (str(score), pid),
+                             "midi": fmt == "midi"})
     return jobs
+
+
+def publish(jobs: list[dict]):
+    """Fertige Tracks an ihren Platz. Erst alle Ziele prüfen, damit ein gesperrtes nicht die Hälfte ersetzt."""
+    ready = [j for j in jobs if Path(j["staged"]).exists()]
+    for j in ready:
+        if Path(j["out"]).exists():
+            Path(j["out"]).open("ab").close()
+    for j in ready:
+        Path(j["out"]).parent.mkdir(exist_ok=True)
+        shutil.move(j["staged"], j["out"])
+
+
+def summary(results: list[Result]) -> str:
+    """Abschlusszeile: wie viele Tracks wo liegen und wie groß sie zusammen sind."""
+    folders = {r.out.parent for r in results}
+    size = sum(r.out.stat().st_size for r in results if r.out.exists())
+    name = next(iter(folders)).name
+    short = name if len(name) <= 20 else name[:18] + "…"
+    where = f"in „{short}“" if len(folders) == 1 else f"in {len(folders)} Ordnern"
+    amount = f"{size / 2 ** 20:.1f} MB".replace(".", ",") if size >= 2 ** 20 else f"{size / 2 ** 10:.0f} KB"
+    return f"Fertig: {len(results)} {'Track' if len(results) == 1 else 'Tracks'} {where}, zusammen {amount}."
+
+
+def folders_to_open(folders: list[Path]) -> list[Path]:
+    """Ein Ordner reicht, wenn die Stücke nah beieinander liegen; ein Laufwerk als Ziel hilft niemandem."""
+    unique = sorted(set(folders))
+    if len(unique) == 1:
+        return unique
+    try:
+        common = Path(os.path.commonpath(unique))
+    except ValueError:  # verschiedene Laufwerke
+        return unique
+    return unique if common == Path(common.anchor) else [common]
 
 
 def export(scores: list[Path], opts: Options,
            progress: Callable[[str, int, int], None] = lambda text, done, total: None,
            cancelled: Callable[[], bool] = lambda: False) -> list[Result]:
-    """Rendert alle Übe-Tracks. progress(text, erledigt, gesamt) zählt beide Durchläufe."""
+    """Rendert alle Übe-Tracks. progress(text, erledigt, gesamt) zählt beide Durchläufe.
+
+    Gerendert wird ins Temp-Verzeichnis: Vorhandene Tracks werden erst ersetzt, wenn alles fertig ist.
+    """
     with tempfile.TemporaryDirectory() as td:
         progress("Partituren vorbereiten", 0, 1)
         jobs = []
@@ -486,15 +539,17 @@ def export(scores: list[Path], opts: Options,
         probes = [j for j in mp3s if j["tempo"] == max(opts.tempos)] if opts.flat_dynamic is None else []
         measured = len(probes)
         total = measured + len(jobs)
-        for j in jobs:
-            Path(j["out"]).parent.mkdir(exist_ok=True)
+        for i, j in enumerate(jobs):
+            staged = Path(td) / "out" / str(i) / Path(j["out"]).name
+            staged.parent.mkdir(parents=True)
+            j["staged"] = str(staged)
             write_variant(j["score"], Path(j["in"]), j["audio"], j["pid"], opts, tempo=j["tempo"])
             j["peak_db"], j["gain"] = None, 0.0
         jobfile = Path(td) / "job.json"
         if probes:
-            progress(f"Pegel messen ({measured} Tracks)", 0, total)
+            progress(f"Lautstärke messen ({measured} Tracks)", 0, total)
             render([{"in": j["in"], "out": j["wav"]} for j in probes], jobfile, opts,
-                   lambda n: progress(f"Pegel messen ({measured} Tracks)", n, total), cancelled)
+                   lambda n: progress(f"Lautstärke messen ({measured} Tracks)", n, total), cancelled)
             levels = {}
             for j in probes:
                 peak = wav_peak(Path(j["wav"]))
@@ -506,18 +561,22 @@ def export(scores: list[Path], opts: Options,
         # Getrennte Aufrufe: mischt einer Audio und MIDI, stürzt MuseScore ab.
         mids = [j for j in jobs if j["midi"]]
         done = measured
-        for text, batch in (("MP3s rendern", mp3s), ("MIDI exportieren", mids)):
+        for text, batch in (("MP3s erstellen", mp3s), ("MIDI erstellen", mids)):
             if batch:
                 progress(text, done, total)
-                render([{"in": j["in"], "out": j["out"]} for j in batch], jobfile, opts,
+                render([{"in": j["in"], "out": j["staged"]} for j in batch], jobfile, opts,
                        lambda n, text=text, done=done: progress(text, done + n, total), cancelled)
                 done += len(batch)
         for j in mids:
+            if not Path(j["staged"]).exists():
+                continue
             with zipfile.ZipFile(j["in"]) as z:
                 mscx = next(n for n in z.namelist() if n.endswith(".mscx") and "/" not in n)
                 parts = staff_parts(z.read(mscx).decode("utf-8"))
-            scale_midi(Path(j["out"]), parts, j["pid"], opts.others_db)
-    return [Result(Path(j["out"]), j["peak_db"], j["gain"]) for j in jobs]
+            scale_midi(Path(j["staged"]), parts, j["pid"], opts.others_db)
+        rendered = [Path(j["staged"]).exists() for j in jobs]
+        publish(jobs)
+    return [Result(Path(j["out"]), j["peak_db"], j["gain"], ok) for j, ok in zip(jobs, rendered)]
 
 
 def main():
@@ -548,6 +607,8 @@ def main():
             opts.merge_unison = False
         elif a == "--no-accompaniment":
             opts.accompaniment = False
+        elif a == "--short-names":
+            opts.short_names = True
         elif a.startswith("--mscore="):
             opts.mscore = a.split("=", 1)[1]
         elif a.startswith("--sampler="):

@@ -46,7 +46,7 @@ a = Analysis(
     # nicht folgen kann; darum direkt auf den Quellbaum zeigen.
     pathex=[SPECPATH],
     binaries=collect_dynamic_libs("velopack"),
-    datas=[("assets/partfocus.ico", "assets")],
+    datas=[("assets/partfocus.ico", "assets"), ("assets/controls", "assets/controls")],
     hiddenimports=["velopack"],
     excludes=EXCLUDES,
     noarchive=False,

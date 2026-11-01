@@ -425,6 +425,18 @@ def test_plan_adds_slower_versions(ms4, tmp_path):
     assert sorted(j["tempo"] for j in jobs) == [60] * 4 + [80] * 4 + [100] * 4
 
 
+def test_plan_short_names_drop_sound_and_space_before_number(ms4, tmp_path):
+    jobs = core.plan(ms4, tmp_path, core.Options(sound="choir", short_names=True))
+    assert [Path(j["out"]).name for j in jobs][:3] == ["Lied - Gesamt.mp3", "Lied - Sopran1.mp3", "Lied - Alt.mp3"]
+
+
+def test_plan_short_names_keep_tempo_so_versions_stay_apart(ms4, tmp_path):
+    jobs = core.plan(ms4, tmp_path, core.Options(sound="piano", format="both", tempos=(100, 80), short_names=True))
+    names = [Path(j["out"]).name for j in jobs]
+    assert "Lied - Sopran1 (80%).mp3" in names and "Lied - Sopran1 (80%).mid" in names
+    assert len(names) == 16 and len(set(names)) == 16
+
+
 # --- Pegel -----------------------------------------------------------------
 
 def write_float_wav(path: Path, samples: list[float]) -> Path:
@@ -643,3 +655,113 @@ def test_requirements_missing_instruments_folder(tmp_path, mscore):
 def test_requirements_missing_pack(tmp_path, mscore):
     missing = core.missing_requirements(mscore, make_sampler(tmp_path, packs=("Muse Keys",)))
     assert len(missing) == 1 and "Muse Choir" in missing[0]
+
+
+# --- Sicheres Ersetzen -----------------------------------------------------
+
+
+def old_track(score, voice="Gesamt", suffix=".mp3"):
+    out = score.parent / score.stem / f"{score.stem} - {voice}{suffix}"
+    out.parent.mkdir(exist_ok=True)
+    out.write_bytes(b"alt")
+    return out
+
+
+def test_failed_render_keeps_existing_tracks(ms4, monkeypatch):
+    old = old_track(ms4)
+
+    def render(jobs, jobfile, opts, tick=lambda n: None, cancelled=lambda: False):
+        fake_render([])(jobs, jobfile, opts)
+        raise RuntimeError("MuseScore beendet mit Code 1")
+
+    monkeypatch.setattr(core, "render", render)
+    with pytest.raises(RuntimeError):
+        core.export([ms4], core.Options())
+    assert old.read_bytes() == b"alt"
+
+
+def test_cancelled_render_keeps_existing_tracks(ms4, monkeypatch):
+    old = old_track(ms4)
+
+    def render(jobs, jobfile, opts, tick=lambda n: None, cancelled=lambda: False):
+        raise core.Cancelled()
+
+    monkeypatch.setattr(core, "render", render)
+    with pytest.raises(core.Cancelled):
+        core.export([ms4], core.Options())
+    assert old.read_bytes() == b"alt"
+
+
+def test_finished_render_replaces_existing_tracks(ms4, monkeypatch):
+    old = old_track(ms4)
+    monkeypatch.setattr(core, "render", fake_render([]))
+    results = core.export([ms4], core.Options())
+    assert old.read_bytes() == b"mp3"
+    assert all(r.ok for r in results)
+
+
+def test_track_missing_after_render_is_not_ok_and_old_one_stays(ms4, monkeypatch):
+    old = old_track(ms4)
+
+    def render(jobs, jobfile, opts, tick=lambda n: None, cancelled=lambda: False):
+        fake_render([])(jobs[1:], jobfile, opts)
+
+    monkeypatch.setattr(core, "render", render)
+    results = core.export([ms4], core.Options())
+    assert old.read_bytes() == b"alt"
+    assert [r.ok for r in results] == [False, True, True, True]
+
+
+def test_blocked_target_replaces_nothing(ms4, monkeypatch):
+    first = old_track(ms4)
+    (first.parent / "Lied - Alt.mp3").mkdir()  # lässt sich wie eine gesperrte Datei nicht schreiben
+    monkeypatch.setattr(core, "render", fake_render([]))
+    with pytest.raises(OSError):
+        core.export([ms4], core.Options())
+    assert first.read_bytes() == b"alt"
+
+
+def test_existing_outputs_finds_what_a_run_would_replace(ms4):
+    assert core.existing_outputs([ms4], core.Options()) == []
+    old = old_track(ms4)
+    old_track(ms4, "Alt (80%)")
+    assert core.existing_outputs([ms4], core.Options()) == [old]
+    assert len(core.existing_outputs([ms4], core.Options(tempos=(100, 80)))) == 2
+    assert core.existing_outputs([ms4], core.Options(format="midi")) == []
+
+
+# --- Abschluss -------------------------------------------------------------
+
+
+def test_summary_names_one_folder_and_counts_several(tmp_path):
+    a = tmp_path / "Lied" / "a.mp3"
+    b = tmp_path / "Chor" / "b.mp3"
+    for f in (a, b):
+        f.parent.mkdir()
+        f.write_bytes(b"x" * 1_572_864)
+    one = [core.Result(a, None, 0.0)]
+    assert core.summary(one) == "Fertig: 1 Track in „Lied“, zusammen 1,5 MB."
+    assert core.summary(one + [core.Result(b, None, 0.0)]) == "Fertig: 2 Tracks in 2 Ordnern, zusammen 3,0 MB."
+
+
+def test_summary_shows_small_runs_in_kb(tmp_path):
+    (tmp_path / "Lied").mkdir()
+    mid = tmp_path / "Lied" / "a.mid"
+    mid.write_bytes(b"x" * 2048)
+    assert core.summary([core.Result(mid, None, 0.0)]) == "Fertig: 1 Track in „Lied“, zusammen 2 KB."
+
+
+def test_folders_to_open_prefers_one_folder(tmp_path):
+    a, b = tmp_path / "Lied", tmp_path / "Chor"
+    assert core.folders_to_open([a, a]) == [a]
+    assert core.folders_to_open([a, b]) == [tmp_path]
+    far = [Path("C:/Noten/A"), Path("D:/Noten/B")]
+    assert core.folders_to_open(far) == far
+    assert core.folders_to_open([Path("C:/A"), Path("C:/B")]) == [Path("C:/A"), Path("C:/B")]
+
+
+def test_summary_shortens_a_long_folder_name(tmp_path):
+    folder = tmp_path / ("Lied " * 12).strip()
+    folder.mkdir()
+    (folder / "a.mp3").write_bytes(b"x" * 2048)
+    assert "„Lied Lied Lied Lie…“" in core.summary([core.Result(folder / "a.mp3", None, 0.0)])

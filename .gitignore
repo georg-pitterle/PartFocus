@@ -13,3 +13,6 @@ selftest.txt
 *.mp3
 *.wav
 Releases/
+
+# Impeccable
+.impeccable/

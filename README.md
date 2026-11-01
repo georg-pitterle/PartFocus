@@ -11,7 +11,8 @@ MP3, in der diese Stimme vorne steht und die anderen leiser mitlaufen, dazu ein
 - Klang: Original, Muse Choir oder Grand Piano
 - Tempo: 100 % bis 50 % in 10-%-Schritten, auch mehrere Fassungen auf einmal
 - Format: MP3, MIDI oder beides; MIDI-Dateien sind nur wenige KB groß
-- MP3 mit 192, 128, 96 oder 64 kbps (pro Minute etwa 1,4 / 1 / 0,7 / 0,5 MB)
+- MP3 in vier Qualitäten mit 192, 128, 96 oder 64 kbps (pro Minute etwa 1,4 / 1 / 0,7 / 0,5 MB)
+- Kurze Dateinamen wahlweise, z. B. `Lied - Bass1.mp3`
 - mit Original-Dynamik alle Tracks auf −1 dBFS normalisiert, nichts übersteuert
 - auch für MuseScore-3-Dateien
 
@@ -28,15 +29,22 @@ laden. PartFocus aktualisiert sich danach selbst.
 
 ## Benutzung
 
-Partituren (.mscz) ins Fenster ziehen, Einstellungen wählen, „Tracks erstellen“.
-Die Tracks landen neben der Partitur im Ordner `<Stück>/`.
+Partituren (.mscz) ins Fenster ziehen. Für jeden entstehenden Track zeigt PartFocus
+ein Heft im Einband seiner Stimmlage. Einstellungen wählen, starten; beim Erstellen
+füllen sich die Hefte, am Ende führt „Ordner öffnen“ zum Ergebnis.
+Die Tracks landen neben der Partitur im Ordner `<Stück>/`. Vorhandene Tracks
+werden erst ersetzt, wenn alle neuen fertig sind; PartFocus fragt vorher nach.
+
+Tastatur: Strg+O fügt Dateien hinzu, Strg+Enter startet, Entf entfernt die
+markierten Partituren, Tab und Enter bedienen alle Knöpfe, Alt mit dem
+unterstrichenen Buchstaben springt zur jeweiligen Einstellung.
 
 Kommandozeile:
 
 ```
 partfocus-cli <datei.mscz | ordner> [--sound=original|choir|piano] [--tempo=100,80] [--dry-run]
               [--format=mp3|midi|both] [--bitrate=192|128|96|64] [--keep-unison] [--no-accompaniment]
-              [--mscore=<MuseScore4.exe>] [--sampler=<MuseSampler-Ordner>]
+              [--short-names] [--mscore=<MuseScore4.exe>] [--sampler=<MuseSampler-Ordner>]
 ```
 
 Standardpfade: `C:\Program Files\MuseScore 4\bin\MuseScore4.exe` und
@@ -87,11 +95,19 @@ Original bleibt unverändert.
   Klang hat MIDI nicht, den wählt das Abspielprogramm; die Dateinamen bekommen
   daher keinen Klang-Zusatz, und gemessen wird nichts. MIDI wird in einem
   eigenen MuseScore-Aufruf nach den MP3s exportiert, gemischt stürzt MuseScore ab.
+- **Kurze Dateinamen:** Mit `--short-names` bzw. Haken bei „Kurze Dateinamen“
+  entfällt der Klang-Zusatz, und das Leerzeichen vor einer Ziffer im Stimmnamen
+  fällt weg: `Lied - Bass1.mp3` statt `Lied - Bass 1 (Muse Choir).mp3`. Der
+  Tempo-Zusatz bleibt, sonst überschrieben sich die Fassungen. Ein Lauf mit einem
+  anderen Klang überschreibt dafür die Dateien des vorherigen.
 - **MuseScore-3-Dateien** haben keine `audiosettings.json` und keine Part-IDs.
   Sie werden zuerst mit `MuseScore4.exe -o` umgewandelt. Die fehlenden
   Track-Einträge legt PartFocus ohne `in` an, dann wählt MuseScore den Klang
   wie beim normalen Öffnen.
-- **Rendern** mit `MuseScore4.exe -j job.json --sound-profile "Muse Sounds"`.
+- **Rendern** mit `MuseScore4.exe -j job.json --sound-profile "Muse Sounds"`
+  ins Temp-Verzeichnis. Erst wenn alles fertig ist, prüft PartFocus, ob jedes Ziel
+  beschreibbar ist, und verschiebt dann alle Tracks. Bei Abbruch, Fehler oder einer
+  noch geöffneten Datei bleiben vorhandene Tracks also unverändert.
   Mit eingeebneter Dynamik ist der Pegel fest: ein Durchlauf als MP3 mit
   der gewählten Bitrate (`-b`, Standard 128 kbps), `master.volumeDb` bleibt 0 dB.
   Mit Original-Dynamik zwei Durchläufe:
@@ -111,7 +127,8 @@ python -m venv .venv
 .venv\Scripts\python -m partfocus
 ```
 
-Das Icon erzeugt `tools/make_icon.py` aus der App-Palette.
+Das Icon erzeugt `tools/make_icon.py` aus der App-Palette, Häkchen und Pfeil der
+Bedienelemente `tools/make_controls.py`.
 
 Releases entstehen über [release-please](https://github.com/googleapis/release-please):
 Commits im Stil von Conventional Commits (`feat:`, `fix:` …) auf `main` halten einen
