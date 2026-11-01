@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0](https://github.com/georg-pitterle/PartFocus/compare/v0.3.0...v0.4.0) (2026-10-25)
+
+
+### Features
+
+* export practice tracks as MIDI instead of or beside MP3 ([574d926](https://github.com/georg-pitterle/PartFocus/commit/574d926a27319d618aa9b3e0ff371488f73df3d1))
+* play accompaniment quietly in every part's track ([574d926](https://github.com/georg-pitterle/PartFocus/commit/574d926a27319d618aa9b3e0ff371488f73df3d1))
+* selectable MP3 bitrate, 128 kbps by default ([574d926](https://github.com/georg-pitterle/PartFocus/commit/574d926a27319d618aa9b3e0ff371488f73df3d1))
+
 ## [0.3.0](https://github.com/georg-pitterle/PartFocus/compare/v0.2.0...v0.3.0) (2026-10-19)
 
 
